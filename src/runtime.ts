@@ -292,6 +292,11 @@ export class SshRuntime extends Service {
     return this.session.exec(command, opts)
   }
 
+  /** Drop the cached live client so the next operation reconnects (stale socket repair). */
+  invalidate(): void {
+    this.session.invalidate()
+  }
+
   private validate(config: ResolvedConfig): void {
     if (config.host.trim().length === 0) throw new Error('dsw: host must be a non-empty string')
     if (!Number.isInteger(config.port) || config.port <= 0 || config.port > 65535) {

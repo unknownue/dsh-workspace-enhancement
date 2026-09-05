@@ -34,6 +34,8 @@ export interface SshTransport {
         cwd?: string;
         signal?: AbortSignal;
     }): Promise<ExecOutcome>;
+    /** Drop the cached live client so the next operation reconnects (stale socket repair). */
+    invalidate?(): void;
     /** Map a caller-supplied working directory onto the transport's remote host. */
     resolveRemoteCwd(cwd: string | undefined): string;
 }

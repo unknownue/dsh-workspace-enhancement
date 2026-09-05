@@ -138,6 +138,8 @@ export declare class SshRuntime extends Service {
         cwd?: string;
         signal?: AbortSignal;
     }): Promise<ExecOutcome>;
+    /** Drop the cached live client so the next operation reconnects (stale socket repair). */
+    invalidate(): void;
     private validate;
 }
 export default SshRuntime;

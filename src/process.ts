@@ -11,7 +11,7 @@ import type {
   SubprocessOutputMode,
   SubprocessSpawnSpec,
 } from '@deepseek-ai/dsh-subprocess'
-import { quoteShellArg } from './ssh-core.ts'
+import { quoteShellArg, isStaleSocketError } from './ssh-core.ts'
 import type { SshTransport } from './transport.ts'
 import { readRemoteEnvironment, scrubRemoteEnvironment, serializeEnvironment } from './environment.ts'
 import { SshOutputCollector } from './output.ts'
@@ -150,18 +150,27 @@ export class SshSubprocessHandle implements SubprocessHandle {
 
   private async run(): Promise<SubprocessOutcome> {
     let channel: ClientChannel
-    try {
-      const command = await buildCommand(this.runtime, this.cwd, this.spec)
-      const client = await this.runtime.getClient()
-      channel = await new Promise<ClientChannel>((resolve, reject) => {
-        client.exec(command, { pty: false }, (error, stream) => {
-          if (error !== undefined) reject(error)
-          else resolve(stream)
+    for (let attempt = 0; ; attempt += 1) {
+      try {
+        const command = await buildCommand(this.runtime, this.cwd, this.spec)
+        const client = await this.runtime.getClient()
+        channel = await new Promise<ClientChannel>((resolve, reject) => {
+          client.exec(command, { pty: false }, (error, stream) => {
+            if (error !== undefined) reject(error)
+            else resolve(stream)
+          })
         })
-      })
-    } catch (error) {
-      this.settle()
-      throw error
+        break
+      } catch (error) {
+        // The cached chain's socket died before the channel opened — drop the
+        // stale state and retry once on a fresh chain (ssh2's `Not connected`).
+        if (attempt === 0 && isStaleSocketError(error)) {
+          this.runtime.invalidate?.()
+          continue
+        }
+        this.settle()
+        throw error
+      }
     }
     this.channel = channel
     if (this.terminationController.signal.aborted) this.signalTerm(channel)

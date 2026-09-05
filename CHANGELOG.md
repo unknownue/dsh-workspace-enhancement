@@ -2,6 +2,21 @@
 
 所有显著改动记录在此文件，格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.0.0/)（版本：语义化版本）。
 
+## [0.1.4](https://github.com/unknownue/dsh-workspace-enhancement) (2026-09-05)
+
+连接自愈：SSH 长连接静默死亡后自动重连，`sw_*` 工具不再报 `Error: Not connected`。
+
+### 修复
+
+- **连接死亡检测**：`SshSession` 现在监听整条 ProxyJump 链的 `close` 事件——远端/NAT/网络把空闲 socket 静默掐断后（此前 `connected` 标记永远为 true、缓存的 `ready` 客户端永远返回死 client），立即失效缓存的 client/SFTP/远端环境，下一次操作透明地重新拨号；`isConnected()` 不再撒谎。
+- **`Not connected` 重试一次**：`SshSession.exec` 与 `SshSubprocessHandle.run`（`sw_exec`/bash 的 spawn 通道）在 socket 恰在通道建立前死亡时，失效连接并换新链重试一次（ssh2 的 `Not connected` 签名），工具调用自愈而非失败。
+- **`sw_connect` 真正重连**：`connectUpsert` 保存后执行 `reconnect`（dispose 旧链 → 重建 → probe），upsert 不再复用死连接——`sw_connect` 的 ping 现在报告真实的连接错误，而不是误导性的 `Not connected`。
+- **keepalive 默认开启（10s）**：registry 连接默认 `keepaliveInterval: 10_000`（此前默认 0 = 关闭），空闲连接不再被云 NAT/防火墙静默清理，且死链可在 `keepaliveCountMax` 个周期内被发现；机器记录显式写 0 仍可关闭。
+
+### 质量
+
+- `tsc` 0 错误；`tsdown` 构建通过；ssh-core 失效/重试逻辑冒烟 7/7。
+
 ## [0.1.3](https://github.com/unknownue/dsh-workspace-enhancement) (2026-09-05)
 
 dsh 0.1.2 兼容修复（fork：unknownue/dsh-workspace-enhancement）。

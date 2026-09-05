@@ -182,6 +182,8 @@ export declare class SshConnection {
     } | undefined;
     /** Release the chain and the shared SFTP channel. */
     dispose(): void;
+    /** Drop the cached live client so the next operation reconnects (stale socket repair). */
+    invalidate(): void;
     /**
      * Map a caller-supplied working directory onto this connection's host. The
      * rules mirror {@link SshRuntime.resolveRemoteCwd}: a POSIX absolute path is

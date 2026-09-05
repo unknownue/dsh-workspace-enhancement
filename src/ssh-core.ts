@@ -157,14 +157,28 @@ export function toConnectConfig(
 /** Resolve once the client reaches its ready state. */
 export function connectReady(client: Client, config: ConnectConfig): Promise<void> {
   return new Promise<void>((resolve, reject) => {
-    const onReady = (): void => { cleanup(); resolve() }
-    const onError = (error: Error): void => { cleanup(); reject(error) }
-    const cleanup = (): void => {
-      client.removeListener('ready', onReady)
-      client.removeListener('error', onError)
+    let settled = false
+    const onReady = (): void => {
+      if (settled) return
+      settled = true
+      resolve()
     }
+    const onError = (error: Error): void => {
+      if (settled) return
+      settled = true
+      reject(error)
+    }
+    // Keep an error listener mounted after settle: ssh2 emits twice on a failed
+    // connect — a socket error first, then `close` → its onDone re-emits
+    // "Connection lost before handshake" via the protocol level. Removing the
+    // listener on the first error turns that second emit into an unhandled
+    // 'error' event which crashes the whole host process (observed: dsh web
+    // died ~1 min after boot when a remote probe hit a mid-handshake reset).
+    // After settle the listener only guards that escape; it never rejects an
+    // already-settled promise. The caller tears the client down on failure
+    // (openChain ends the partial chain), after which ssh2 emits no more errors.
     client.once('ready', onReady)
-    client.once('error', onError)
+    client.on('error', onError)
     client.connect(config)
   })
 }
@@ -221,6 +235,17 @@ export async function openChain(
     }
     throw error
   }
+}
+
+/**
+ * ssh2 throws this exact message synchronously from `exec`/`shell`/`sftp`
+ * when the client's socket is gone (closed by the peer, NAT, or network
+ * loss) — the stale cached connection signature the callers retry on.
+ * @param error - the thrown value to classify.
+ * @returns whether the error marks a dead cached socket.
+ */
+export function isStaleSocketError(error: unknown): boolean {
+  return error instanceof Error && error.message === 'Not connected'
 }
 
 /**
@@ -349,6 +374,8 @@ export class SshSession {
   private remoteEnvironment: Promise<Record<string, string>> | undefined
   private disposed = false
   private connected = false
+  /** `(client, listener)` pairs guarding the open chain's lifetime. */
+  private readonly closeGuards: Array<{ client: Client; onClose: () => void }> = []
 
   constructor(
     private readonly hosts: readonly ResolvedConnectionHost[],
@@ -425,15 +452,27 @@ export class SshSession {
    */
   async exec(command: string, opts?: { cwd?: string; signal?: AbortSignal }): Promise<ExecOutcome> {
     opts?.signal?.throwIfAborted()
-    const client = await this.getClient(opts?.signal)
     const cwdMapper = this.options.resolveRemoteCwd
     const resolvedCwd = opts?.cwd !== undefined
       ? (cwdMapper !== undefined ? cwdMapper(opts.cwd) : opts.cwd)
       : undefined
     const text = resolvedCwd !== undefined ? wrapCwd(resolvedCwd, command) : command
-    const outcome = await execChannel(client, text, opts)
-    opts?.signal?.throwIfAborted()
-    return outcome
+    for (let attempt = 0; ; attempt += 1) {
+      const client = await this.getClient(opts?.signal)
+      try {
+        const outcome = await execChannel(client, text, opts)
+        opts?.signal?.throwIfAborted()
+        return outcome
+      } catch (error) {
+        // The cached chain's socket died before (or while) the channel
+        // opened — drop the stale state and retry once on a fresh chain.
+        if (attempt === 0 && isStaleSocketError(error)) {
+          this.invalidate()
+          continue
+        }
+        throw error
+      }
+    }
   }
 
   /** Release the chain and the shared SFTP channel (idempotent). */
@@ -441,6 +480,7 @@ export class SshSession {
     if (this.disposed) return
     this.disposed = true
     this.connected = false
+    this.detachCloseDetection()
     if (this.sftp !== undefined) {
       const sftp = this.sftp
       this.sftp = undefined
@@ -465,6 +505,56 @@ export class SshSession {
 
   private disposedMessage(): string {
     return this.options.disposedMessage ?? 'SSH service is disposing'
+  }
+
+  /**
+   * Drop the cached live connection without disposing the session. After a
+   * socket dies on its own (peer close, NAT/network drop, sshd restart) the
+   * `connected` flag is stale and the cached `ready` client is dead — every
+   * `exec` on it throws ssh2's `Not connected`. Invalidating clears the
+   * cached client, SFTP channel, and remote environment so the next
+   * operation opens a fresh chain transparently. Idempotent, and safe to
+   * call from the close guards (which detach themselves first).
+   */
+  invalidate(): void {
+    if (this.disposed) return
+    this.detachCloseDetection()
+    this.connected = false
+    this.ready = undefined
+    this.sftp = undefined
+    this.sftpOpening = undefined
+    this.remoteEnvironment = undefined
+    const clients = this.clients
+    this.clients = []
+    // End the target first so its channel closes before the jump sockets it rode.
+    for (const client of clients.reverse()) {
+      try {
+        client.end()
+      } catch (_alreadyEnded) {
+        // A client that already ended is already quiescent.
+      }
+    }
+  }
+
+  /**
+   * Watch every hop of the open chain: when any socket closes on its own the
+   * session invalidates so a dead client is never served. ssh2 emits `close`
+   * once per client (deliberate `end()` included), so a reconnect that races
+   * a stale close simply invalidates again — harmless.
+   * @param clients - the freshly opened chain, target last.
+   */
+  private attachCloseDetection(clients: readonly Client[]): void {
+    for (const client of clients) {
+      const onClose = (): void => { this.invalidate() }
+      client.on('close', onClose)
+      this.closeGuards.push({ client, onClose })
+    }
+  }
+
+  /** Remove the close guards (before a deliberate teardown or rebuild). */
+  private detachCloseDetection(): void {
+    for (const guard of this.closeGuards) guard.client.removeListener('close', guard.onClose)
+    this.closeGuards.length = 0
   }
 
   /** Whether the chain reached its ready state and has not been disposed. */
@@ -515,6 +605,7 @@ export class SshSession {
     const clients = await openChain(hosts, this.strict, this.knownHosts, this.options.hostVerifier)
     this.clients = clients
     this.connected = true
+    this.attachCloseDetection(clients)
     return clients[clients.length - 1] as Client
   }
 }

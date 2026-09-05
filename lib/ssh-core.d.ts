@@ -96,6 +96,14 @@ export declare function forwardThrough(client: Client, host: string, port: numbe
  */
 export declare function openChain(hosts: readonly ResolvedConnectionHost[], strict: boolean, knownHosts: readonly string[], hostVerifier?: (host: ResolvedConnectionHost, key: Buffer) => boolean): Promise<Client[]>;
 /**
+ * ssh2 throws this exact message synchronously from `exec`/`shell`/`sftp`
+ * when the client's socket is gone (closed by the peer, NAT, or network
+ * loss) — the stale cached connection signature the callers retry on.
+ * @param error - the thrown value to classify.
+ * @returns whether the error marks a dead cached socket.
+ */
+export declare function isStaleSocketError(error: unknown): boolean;
+/**
  * Run one control-plane command on an authenticated client with collected
  * output. Used by adapters for executable lookup, canonical-path resolution,
  * and the remote-environment probe, not for user work.
@@ -171,6 +179,8 @@ export declare class SshSession {
     private remoteEnvironment;
     private disposed;
     private connected;
+    /** `(client, listener)` pairs guarding the open chain's lifetime. */
+    private readonly closeGuards;
     constructor(hosts: readonly ResolvedConnectionHost[], strict: boolean, knownHosts: readonly string[], options?: SshSessionOptions);
     /**
      * Return the shared live connection after the jump chain and auth succeed.
@@ -208,6 +218,26 @@ export declare class SshSession {
     /** Release the chain and the shared SFTP channel (idempotent). */
     dispose(): void;
     private disposedMessage;
+    /**
+     * Drop the cached live connection without disposing the session. After a
+     * socket dies on its own (peer close, NAT/network drop, sshd restart) the
+     * `connected` flag is stale and the cached `ready` client is dead — every
+     * `exec` on it throws ssh2's `Not connected`. Invalidating clears the
+     * cached client, SFTP channel, and remote environment so the next
+     * operation opens a fresh chain transparently. Idempotent, and safe to
+     * call from the close guards (which detach themselves first).
+     */
+    invalidate(): void;
+    /**
+     * Watch every hop of the open chain: when any socket closes on its own the
+     * session invalidates so a dead client is never served. ssh2 emits `close`
+     * once per client (deliberate `end()` included), so a reconnect that races
+     * a stale close simply invalidates again — harmless.
+     * @param clients - the freshly opened chain, target last.
+     */
+    private attachCloseDetection;
+    /** Remove the close guards (before a deliberate teardown or rebuild). */
+    private detachCloseDetection;
     /** Whether the chain reached its ready state and has not been disposed. */
     isConnected(): boolean;
     private rewrapConnect;

@@ -265,7 +265,13 @@ export class SshConnection {
     // Tailscale/DERP-relayed paths routinely exceed 20s to ready (observed
     // 4–20s variance); OpenSSH has no client-side handshake cap at all.
     const readyTimeout = spec.readyTimeout ?? 45_000
-    const keepaliveInterval = spec.keepaliveInterval ?? 0
+    // Keepalive defaults ON: idle SSH sockets silently die behind NAT/cloud
+    // firewalls (observed: a connection idle a few hours dropped while the
+    // plugin still cached it — every later tool call failed with ssh2's
+    // `Not connected`). ssh2 keepalives both keep the channel alive and let
+    // the close guard detect a dead peer within `keepaliveCountMax` probes.
+    // A spec value wins, so an explicit 0 still disables.
+    const keepaliveInterval = spec.keepaliveInterval ?? 10_000
     const keepaliveCountMax = spec.keepaliveCountMax ?? 3
     const parent: ResolvedConnectionHost = {
       host: spec.host,
@@ -351,6 +357,11 @@ export class SshConnection {
   /** Release the chain and the shared SFTP channel. */
   dispose(): void {
     this.session.dispose()
+  }
+
+  /** Drop the cached live client so the next operation reconnects (stale socket repair). */
+  invalidate(): void {
+    this.session.invalidate()
   }
 
   /**
