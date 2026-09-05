@@ -1,18 +1,18 @@
 {
   "name": "dsh-workspace-enhancement",
-  "version": "0.1.2",
+  "version": "0.1.3",
   "description": "Unified SSH remote-execution plugin for DeepSeek Harness — ProxyJump chain, SFTP filesystem, subprocess and PTY over ssh2",
   "type": "module",
   "license": "MIT",
   "author": "DobyChao (https://github.com/DobyChao)",
   "repository": {
     "type": "git",
-    "url": "https://github.com/DobyChao/dsh-workspace-enhancement.git"
+    "url": "https://github.com/unknownue/dsh-workspace-enhancement.git"
   },
   "bugs": {
-    "url": "https://github.com/DobyChao/dsh-workspace-enhancement/issues"
+    "url": "https://github.com/unknownue/dsh-workspace-enhancement/issues"
   },
-  "homepage": "https://github.com/DobyChao/dsh-workspace-enhancement",
+  "homepage": "https://github.com/unknownue/dsh-workspace-enhancement",
   "main": "lib/index.js",
   "types": "lib/index.d.ts",
   "exports": {
@@ -54,7 +54,6 @@
       "inject": [
         "@deepseek-ai/dsh-client-connection",
         "@deepseek-ai/dsh-client-locale",
-        "@deepseek-ai/dsh-client-runtime",
         "@deepseek-ai/dsh-client-ui-conversation",
         "@deepseek-ai/dsh-client-ui-sidebar",
         "@deepseek-ai/dsh-client-ui-workspace"

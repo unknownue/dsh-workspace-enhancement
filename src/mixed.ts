@@ -193,6 +193,12 @@ export type FileSystemBranch = {
   resolve(path: string, opts?: { cwd?: string; signal?: AbortSignal }): Promise<FsTarget>
   processPath(target: FsTarget): string
   fileUrl(target: FsTarget): string
+  /**
+   * dsh 0.1.2 seam: map an absolute harness-host path into this world's
+   * process path when both identify the same file; undefined = no mapping.
+   * Optional because pre-0.1.2 local backends do not implement it.
+   */
+  processPathFromHostPath?(hostPath: string): string | undefined
   contains(parent: FsTarget, child: FsTarget): boolean
   stat(target: FsTarget, signal?: AbortSignal): Promise<FsInfo | undefined>
   lstat(path: string, opts?: { cwd?: string }, signal?: AbortSignal): Promise<FsPathInfo | undefined>
@@ -268,6 +274,16 @@ export class MixedFileSystem implements FileSystemBranch {
     return worldOfTargetKey(String(target.targetKey)) === 'remote'
       ? this.remote.fileUrl(target)
       : this.local.fileUrl(target)
+  }
+
+  /**
+   * dsh 0.1.2 seam: the LLM layer probes ctx.fs.processPathFromHostPath when
+   * resolving image attachments. Host paths belong to the local world, so
+   * delegate to the local backend's mapping when it implements one (0.1.2
+   * backends do); otherwise answer the base contract's "no mapping".
+   */
+  processPathFromHostPath(hostPath: string): string | undefined {
+    return this.local.processPathFromHostPath?.(hostPath)
   }
 
   /** @inheritdoc — targets from different worlds never contain one another. */

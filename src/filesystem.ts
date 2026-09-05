@@ -608,6 +608,15 @@ export class SshFileSystem extends FileSystem {
     return this.engine.fileUrl(target)
   }
 
+  processPathFromHostPath(_hostPath: string): string | undefined {
+    // dsh 0.1.2 seam: the LLM layer probes ctx.fs.processPathFromHostPath when
+    // resolving image attachments (`ctx.get("fs")?.processPathFromHostPath`).
+    // A remote SSH world has no host↔remote path identity mapping to offer;
+    // answering the base contract's "no mapping" (undefined) keeps image
+    // attachments on their text placeholder instead of throwing.
+    return undefined
+  }
+
   contains(parent: FsTarget, child: FsTarget): boolean {
     return this.engine.contains(parent, child)
   }

@@ -2,6 +2,20 @@
 
 所有显著改动记录在此文件，格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.0.0/)（版本：语义化版本）。
 
+## [0.1.3](https://github.com/unknownue/dsh-workspace-enhancement) (2026-09-05)
+
+dsh 0.1.2 兼容修复（fork：unknownue/dsh-workspace-enhancement）。
+
+### 修复
+
+- **`ctx.fs.processPathFromHostPath` seam**：dsh 0.1.2 的 LLM 层（dsh-llm-deepseek / dsh-llm-pi-ai）解析图片附件时会调用 `ctx.get("fs")?.processPathFromHostPath(hostPath)`；远程世界没有宿主机↔远程路径的同一性映射，`SshFileSystem` 按 base 契约返回 `undefined`（图片附件降级为文本占位符，不再抛 `...processPathFromHostPath is not a function` 导致整轮失败），`MixedFileSystem` 委托本地后端（0.1.2 后端已实现该映射）。
+- **`dsh.client.inject` 移除 `@deepseek-ai/dsh-client-runtime`**：该模块在 dsh 0.1.2 已从客户端模块图移除，从 inject 列表中删除以免残留悬空引用。
+- **预构建 `lib/` 入库**：仓库现在携带构建产物，`github:` 依赖安装后开箱即用（与 unknownue 其它插件仓库的发布约定一致）。
+
+### 质量
+
+- 单测 225/225；`tsc` 0 错误；`tsdown` 构建通过。
+
 ## [0.1.2](https://github.com/DobyChao/dsh-workspace-enhancement) (2026-08-31)
 
 依赖对齐修复与运行时国际化（R6 I18N）：客户端 UI、宿主「远程认知」系统提示与 `sw_*` 工具面三面全量双语（zh/en）。
