@@ -1,7 +1,9 @@
 /**
  * Web-facing RPC channel of dsh-workspace-enhancement: mounts the connection
- * registry and registers the `/dsw` unary channel on the shared web transport
- * with the loopback trust fence. The client half drives connection management
+ * registry and registers the `/dsw` unary channel on the shared web transport.
+ * Host/Origin fencing is the connection service's global loopback-and-trusted
+ * check, so the channel carries no per-route authority anymore (dropped in
+ * `dsh 0.1.5`). The client half drives connection management
  * and remote directory browsing through it; endpoints are plain JSON. Remote
  * listing shares one level walk with the directory-picker backend
  * ({@link module:dsh-workspace-enhancement/listing}).
@@ -9,6 +11,7 @@
  */
 
 import { mkdir, rm } from 'node:fs/promises'
+import type { IncomingMessage, ServerResponse } from 'node:http'
 import { posix } from 'node:path'
 import type { Stats } from 'ssh2'
 import type { Context } from '@deepseek-ai/cordis'
@@ -61,15 +64,27 @@ declare module '@deepseek-ai/cordis' {
         handle(
           channel: string,
           handler: (endpoint: string, payload: unknown, signal: AbortSignal) => Promise<ChannelResult>,
-          options: { authority: 'loopback' | 'trusted-host' },
         ): () => Promise<void>
       }
+    }
+    /**
+     * Host HTTP route registry. The connection transport mounts every channel
+     * route here, so a channel owner must inject this service (`dsh 0.1.5`;
+     * earlier builds read it off the connection service and needed no
+     * injection). See {@link mountChannel} for the owning-context subtlety.
+     */
+    webServer: {
+      register(route: {
+        kind: 'exact' | 'prefix'
+        path: string
+        handler: (req: IncomingMessage, res: ServerResponse) => void | Promise<void>
+      }): () => void
     }
   }
 }
 
 /** Required host services: the web transport + the tools/system-prompt registry. */
-export const inject = ['connection', 'tools', 'systemPrompt']
+export const inject = ['connection', 'webServer', 'tools', 'systemPrompt']
 
 /** Validated channel config. */
 export const Config: z<WebChannelConfig> = z.object({
@@ -522,7 +537,47 @@ export function apply(ctx: Context, config: WebChannelConfig): void {
     }
   }
 
-  const dispose = ctx.connection.rpc.handle('/dsw', dispatch, { authority: 'loopback' })
+  const dispose = mountChannel(ctx, dispatch)
   ctx.effect(() => dispose, 'dsw: /dsw rpc channel')
   registerWorkspaceTools(ctx, registry, () => ctx.get('sideWorkspaces', false) as SessionSideWorkspaceStore | undefined)
+}
+
+/** Absolute channel prefix the client half calls through. */
+const CHANNEL = '/dsw'
+
+/** Decoded-endpoint handler shape the connection transport expects. */
+type ChannelDispatch = (endpoint: string, payload: unknown, signal: AbortSignal) => Promise<ChannelResult>
+
+/**
+ * Mount the `/dsw` channel on the shared connection transport.
+ *
+ * `connection.rpc.handle()` is the documented seam, but it is unusable on
+ * `dsh 0.1.5`: its owning context is a cordis *shadow* whose service
+ * resolution starts at the connection plugin's own fiber
+ * (`dsh-client-connection/lib/index.js` — `get rpc()` captures `this.ctx`,
+ * and `createShadow` rebinds that to the service's context). That fiber
+ * injects only `credentials`, and 0.1.5 moved `webServer` into a nested
+ * `ctx.inject` below it, so the walk never reaches the service and every
+ * caller gets `cannot get property "webServer" without inject` — regardless
+ * of what the caller injects.
+ *
+ * `register(owner, channel, handler)` is the same body with the owner passed
+ * in explicitly, so it works with our own context, where `webServer` does
+ * resolve. It is unexported upstream, hence the structural probe; the public
+ * seam is tried first so a fixed harness needs no change here.
+ *
+ * @param ctx - plugin context, which must inject `connection` and `webServer`.
+ * @param dispatch - decoded-endpoint handler.
+ * @returns the disposer removing the channel.
+ */
+function mountChannel(ctx: Context, dispatch: ChannelDispatch): () => Promise<void> | void {
+  try {
+    return ctx.connection.rpc.handle(CHANNEL, dispatch)
+  } catch (error) {
+    const internal = ctx.connection as unknown as {
+      register?: (owner: Context, channel: string, handler: ChannelDispatch) => () => Promise<void>
+    }
+    if (typeof internal.register !== 'function' || internal.register.length < 3) throw error
+    return internal.register(ctx, CHANNEL, dispatch)
+  }
 }
