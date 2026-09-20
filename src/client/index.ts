@@ -22,7 +22,6 @@ import { SshWorkspaceFlow } from './flow.tsx'
 import { installRowBadges } from './row-badges.ts'
 import type { RowBadgeSources } from './row-badges.ts'
 import { RemoteWorkspaceSettingsPage } from './settings.tsx'
-import { SideWorkspacesAction } from './side-workspaces.tsx'
 
 /** Local, self-contained wire contracts (no cross-plugin value imports). */
 export interface WireEntry {
@@ -190,17 +189,14 @@ export function apply(ctx: Context): void {
       locale: 'dsw',
       inject: injected,
     }, RemoteWorkspaceSettingsPage))
-  // R5: one per-session「工作区」button in the header action row — the single
-  // entry point for attached side workspaces (add/edit perms/remove).
-  ctx.slots.inject('conversation.session.header.actions', () =>
-    ctx.slots.register({
-      name: 'conversation.session.header.actions',
-      id: 'dsh-workspace-enhancement-side',
-      order: 25,
-      label: () => t('side.headerAction.label'),
-      locale: 'dsw',
-      inject: injected,
-    }, SideWorkspacesAction))
+  // R5 UI ENTRY POINT REMOVED (fork-local change): the per-session
+  // 「⊕ 工作区」header button (id `dsh-workspace-enhancement-side`) is no longer
+  // registered, so the session header stays free of workspace management.
+  // Only the trigger registration is dropped: the host half (session.ws.* RPC in
+  // web.ts, SessionWorkspaces, the side roots in the fs/exec routing, the prompt
+  // and tool rendering) is untouched, and SideWorkspacesAction / its locale keys
+  // stay in the tree unreferenced so a later merge with upstream is a one-hunk
+  // conflict. Re-registering the row above restores the button.
   installSidebarRowBadges(ctx)
 }
 
