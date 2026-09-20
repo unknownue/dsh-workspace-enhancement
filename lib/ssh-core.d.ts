@@ -88,13 +88,15 @@ export declare function forwardThrough(client: Client, host: string, port: numbe
  * Open the whole jump chain: each hop connects after the previous one, and the
  * last client is the target. On failure the already-opened clients are ended
  * (the original error owns the failure) and it is rethrown.
- * @param hosts - resolved hops in order (target last).
- * @param strict - whether to enforce {@link hostVerifierFor} on every hop.
- * @param knownHosts - trusted host keys applied when strict.
  * @param hostVerifier - optional per-hop verifier (TOFU); wins over strict.
+ * @param onClient - optional callback run with each client immediately after
+ * construction, BEFORE its connect attempt — the seam where a session owner
+ * attaches lifecycle listeners so no window exists in which an emitted
+ * `'error'` would be unobserved (an unobserved ssh2 `'error'` crashes the
+ * host process).
  * @returns the opened clients, target last.
  */
-export declare function openChain(hosts: readonly ResolvedConnectionHost[], strict: boolean, knownHosts: readonly string[], hostVerifier?: (host: ResolvedConnectionHost, key: Buffer) => boolean): Promise<Client[]>;
+export declare function openChain(hosts: readonly ResolvedConnectionHost[], strict: boolean, knownHosts: readonly string[], hostVerifier?: (host: ResolvedConnectionHost, key: Buffer) => boolean, onClient?: (client: Client) => void): Promise<Client[]>;
 /**
  * ssh2 throws this exact message synchronously from `exec`/`shell`/`sftp`
  * when the client's socket is gone (closed by the peer, NAT, or network
@@ -115,6 +117,16 @@ export declare function isStaleSocketError(error: unknown): boolean;
 export declare function execChannel(client: Client, text: string, opts?: {
     signal?: AbortSignal;
 }): Promise<ExecOutcome>;
+/**
+ * Open a long-lived remote exec whose stdout is NOT collected into a string.
+ * The framed core RPC (REQ-I5) lives on this duplex; {@link execChannel}
+ * would swallow the protocol bytes.
+ */
+export declare function startExec(client: Client, text: string, opts?: {
+    signal?: AbortSignal | undefined;
+    /** Drain exec stderr (ssh2 otherwise buffers it and can stall or drop the channel). */
+    onStderr?: ((chunk: Buffer) => void) | undefined;
+}): Promise<ClientChannel>;
 /** Parse the NUL-delimited name/value stream produced by a remote `env -0`. */
 export declare function parseRemoteEnvironment(stdout: string): Record<string, string>;
 /**
@@ -160,6 +172,17 @@ export interface SshSessionOptions {
     redactMessage?: (message: string) => string;
 }
 /**
+ * Observe one opened chain client for transport-level death. ssh2 emits a
+ * bare `'error'` (e.g. a post-auth ECONNRESET) on the Client; with no
+ * listener attached Node turns it into an uncaught exception that kills the
+ * host process. The `'close'` event covers silent socket death without an
+ * error. Both are terminal for the chain.
+ * @param client - a client returned by (or handed to) {@link openChain}.
+ * @param onDead - called at most once per client; the error is present for
+ * the `'error'` path and absent for a clean/silent close.
+ */
+export declare function watchChainClient(client: Client, onDead: (error?: Error) => void): void;
+/**
  * One authenticated SSH session state shared by the aggregate runtime and the
  * registry-owned connections: the opened jump chain, the lazily shared SFTP
  * channel, and the cached remote login environment, plus disposal. Order and
@@ -179,8 +202,8 @@ export declare class SshSession {
     private remoteEnvironment;
     private disposed;
     private connected;
-    /** `(client, listener)` pairs guarding the open chain's lifetime. */
-    private readonly closeGuards;
+    /** Bumped on every chain open; death events from stale chains are ignored. */
+    private generation;
     constructor(hosts: readonly ResolvedConnectionHost[], strict: boolean, knownHosts: readonly string[], options?: SshSessionOptions);
     /**
      * Return the shared live connection after the jump chain and auth succeed.
@@ -218,30 +241,29 @@ export declare class SshSession {
     /** Release the chain and the shared SFTP channel (idempotent). */
     dispose(): void;
     private disposedMessage;
-    /**
-     * Drop the cached live connection without disposing the session. After a
-     * socket dies on its own (peer close, NAT/network drop, sshd restart) the
-     * `connected` flag is stale and the cached `ready` client is dead — every
-     * `exec` on it throws ssh2's `Not connected`. Invalidating clears the
-     * cached client, SFTP channel, and remote environment so the next
-     * operation opens a fresh chain transparently. Idempotent, and safe to
-     * call from the close guards (which detach themselves first).
-     */
-    invalidate(): void;
-    /**
-     * Watch every hop of the open chain: when any socket closes on its own the
-     * session invalidates so a dead client is never served. ssh2 emits `close`
-     * once per client (deliberate `end()` included), so a reconnect that races
-     * a stale close simply invalidates again — harmless.
-     * @param clients - the freshly opened chain, target last.
-     */
-    private attachCloseDetection;
-    /** Remove the close guards (before a deliberate teardown or rebuild). */
-    private detachCloseDetection;
-    /** Whether the chain reached its ready state and has not been disposed. */
+    /** Whether the chain reached ready and has not been disposed or invalidated. */
     isConnected(): boolean;
     private rewrapConnect;
     private openSftp;
     private readRemoteEnvironment;
     private open;
+    /**
+     * Death handler for one opened chain client of the given generation. Only
+     * the current generation owns the session state: a failed connect attempt
+     * is torn down by openChain itself, a superseding open has already bumped
+     * the generation, and a dispose ends the clients deliberately — all three
+     * are ignored here.
+     */
+    private handleChainDeath;
+    /**
+     * Drop every cached artifact of a dead connection so the next call reopens:
+     * the ready promise, the shared SFTP channel (its own close/end handlers
+     * also self-invalidate), and the cached login environment. The dead clients
+     * are dropped too — a terminal `'error'`/`'close'` already ended them.
+     *
+     * Public because the exec/run retry path must drop a socket that died before
+     * its `close` event was observed (the `isStaleSocketError` branch); the
+     * `connected` guard keeps a concurrent death handler from double-invalidating.
+     */
+    invalidate(error?: Error): void;
 }

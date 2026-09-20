@@ -197,10 +197,12 @@ export function forwardThrough(client: Client, host: string, port: number): Prom
  * Open the whole jump chain: each hop connects after the previous one, and the
  * last client is the target. On failure the already-opened clients are ended
  * (the original error owns the failure) and it is rethrown.
- * @param hosts - resolved hops in order (target last).
- * @param strict - whether to enforce {@link hostVerifierFor} on every hop.
- * @param knownHosts - trusted host keys applied when strict.
  * @param hostVerifier - optional per-hop verifier (TOFU); wins over strict.
+ * @param onClient - optional callback run with each client immediately after
+ * construction, BEFORE its connect attempt — the seam where a session owner
+ * attaches lifecycle listeners so no window exists in which an emitted
+ * `'error'` would be unobserved (an unobserved ssh2 `'error'` crashes the
+ * host process).
  * @returns the opened clients, target last.
  */
 export async function openChain(
@@ -208,6 +210,7 @@ export async function openChain(
   strict: boolean,
   knownHosts: readonly string[],
   hostVerifier?: (host: ResolvedConnectionHost, key: Buffer) => boolean,
+  onClient?: (client: Client) => void,
 ): Promise<Client[]> {
   const clients: Client[] = []
   try {
@@ -215,6 +218,7 @@ export async function openChain(
       const host = hosts[index] as ResolvedConnectionHost
       const previous = clients[index - 1]
       const client = new Client()
+      onClient?.(client)
       clients.push(client)
       const config = toConnectConfig(host, strict, knownHosts, hostVerifier)
       if (previous === undefined) {
@@ -294,6 +298,64 @@ export function execChannel(client: Client, text: string, opts?: { signal?: Abor
   })
 }
 
+/**
+ * Open a long-lived remote exec whose stdout is NOT collected into a string.
+ * The framed core RPC (REQ-I5) lives on this duplex; {@link execChannel}
+ * would swallow the protocol bytes.
+ */
+export function startExec(
+  client: Client,
+  text: string,
+  opts?: {
+    signal?: AbortSignal | undefined
+    /** Drain exec stderr (ssh2 otherwise buffers it and can stall or drop the channel). */
+    onStderr?: ((chunk: Buffer) => void) | undefined
+  },
+): Promise<ClientChannel> {
+  return new Promise<ClientChannel>((resolve, reject) => {
+    let settled = false
+    let channel: ClientChannel | undefined
+    const onAbort = (): void => { channel?.close() }
+    const fail = (error: Error): void => {
+      if (settled) return
+      settled = true
+      opts?.signal?.removeEventListener('abort', onAbort)
+      reject(error)
+    }
+    client.exec(text, { pty: false }, (error, stream) => {
+      if (error !== undefined) {
+        fail(error)
+        return
+      }
+      channel = stream
+      // Always drain stderr: unread stderr is a known ssh2 stall, and jail
+      // failures (`dsh-core: jail: …`) are written here, not stdout.
+      stream.stderr.on('data', (chunk: Buffer) => { opts?.onStderr?.(chunk) })
+      if (settled) {
+        stream.close()
+        return
+      }
+      if (opts?.signal?.aborted === true) {
+        stream.close()
+        const reason = opts.signal.reason
+        fail(reason instanceof Error ? reason : new Error('aborted'))
+        return
+      }
+      settled = true
+      // The serve outlives one tool call (ADR-0024 idle 10 min). Do not close
+      // the channel when the opener's AbortSignal later fires.
+      opts?.signal?.removeEventListener('abort', onAbort)
+      resolve(stream)
+    })
+    if (opts?.signal?.aborted === true) {
+      const reason = opts.signal.reason
+      fail(reason instanceof Error ? reason : new Error('aborted'))
+      return
+    }
+    opts?.signal?.addEventListener('abort', onAbort, { once: true })
+  })
+}
+
 /** Parse the NUL-delimited name/value stream produced by a remote `env -0`. */
 export function parseRemoteEnvironment(stdout: string): Record<string, string> {
   const environment: Record<string, string> = {}
@@ -359,6 +421,21 @@ export interface SshSessionOptions {
 }
 
 /**
+ * Observe one opened chain client for transport-level death. ssh2 emits a
+ * bare `'error'` (e.g. a post-auth ECONNRESET) on the Client; with no
+ * listener attached Node turns it into an uncaught exception that kills the
+ * host process. The `'close'` event covers silent socket death without an
+ * error. Both are terminal for the chain.
+ * @param client - a client returned by (or handed to) {@link openChain}.
+ * @param onDead - called at most once per client; the error is present for
+ * the `'error'` path and absent for a clean/silent close.
+ */
+export function watchChainClient(client: Client, onDead: (error?: Error) => void): void {
+  client.on('error', (error: Error) => { onDead(error) })
+  client.on('close', () => { onDead() })
+}
+
+/**
  * One authenticated SSH session state shared by the aggregate runtime and the
  * registry-owned connections: the opened jump chain, the lazily shared SFTP
  * channel, and the cached remote login environment, plus disposal. Order and
@@ -374,8 +451,8 @@ export class SshSession {
   private remoteEnvironment: Promise<Record<string, string>> | undefined
   private disposed = false
   private connected = false
-  /** `(client, listener)` pairs guarding the open chain's lifetime. */
-  private readonly closeGuards: Array<{ client: Client; onClose: () => void }> = []
+  /** Bumped on every chain open; death events from stale chains are ignored. */
+  private generation = 0
 
   constructor(
     private readonly hosts: readonly ResolvedConnectionHost[],
@@ -480,7 +557,6 @@ export class SshSession {
     if (this.disposed) return
     this.disposed = true
     this.connected = false
-    this.detachCloseDetection()
     if (this.sftp !== undefined) {
       const sftp = this.sftp
       this.sftp = undefined
@@ -507,57 +583,7 @@ export class SshSession {
     return this.options.disposedMessage ?? 'SSH service is disposing'
   }
 
-  /**
-   * Drop the cached live connection without disposing the session. After a
-   * socket dies on its own (peer close, NAT/network drop, sshd restart) the
-   * `connected` flag is stale and the cached `ready` client is dead — every
-   * `exec` on it throws ssh2's `Not connected`. Invalidating clears the
-   * cached client, SFTP channel, and remote environment so the next
-   * operation opens a fresh chain transparently. Idempotent, and safe to
-   * call from the close guards (which detach themselves first).
-   */
-  invalidate(): void {
-    if (this.disposed) return
-    this.detachCloseDetection()
-    this.connected = false
-    this.ready = undefined
-    this.sftp = undefined
-    this.sftpOpening = undefined
-    this.remoteEnvironment = undefined
-    const clients = this.clients
-    this.clients = []
-    // End the target first so its channel closes before the jump sockets it rode.
-    for (const client of clients.reverse()) {
-      try {
-        client.end()
-      } catch (_alreadyEnded) {
-        // A client that already ended is already quiescent.
-      }
-    }
-  }
-
-  /**
-   * Watch every hop of the open chain: when any socket closes on its own the
-   * session invalidates so a dead client is never served. ssh2 emits `close`
-   * once per client (deliberate `end()` included), so a reconnect that races
-   * a stale close simply invalidates again — harmless.
-   * @param clients - the freshly opened chain, target last.
-   */
-  private attachCloseDetection(clients: readonly Client[]): void {
-    for (const client of clients) {
-      const onClose = (): void => { this.invalidate() }
-      client.on('close', onClose)
-      this.closeGuards.push({ client, onClose })
-    }
-  }
-
-  /** Remove the close guards (before a deliberate teardown or rebuild). */
-  private detachCloseDetection(): void {
-    for (const guard of this.closeGuards) guard.client.removeListener('close', guard.onClose)
-    this.closeGuards.length = 0
-  }
-
-  /** Whether the chain reached its ready state and has not been disposed. */
+  /** Whether the chain reached ready and has not been disposed or invalidated. */
   isConnected(): boolean {
     return this.connected && !this.disposed
   }
@@ -602,10 +628,55 @@ export class SshSession {
     const hosts = this.options.resolveHosts === undefined
       ? this.hosts
       : await this.options.resolveHosts(this.hosts)
-    const clients = await openChain(hosts, this.strict, this.knownHosts, this.options.hostVerifier)
+    const generation = ++this.generation
+    const clients = await openChain(
+      hosts,
+      this.strict,
+      this.knownHosts,
+      this.options.hostVerifier,
+      // Attached before the connect attempt (issue BUG-5): from this moment
+      // every `'error'` is observed, so a post-auth ECONNRESET can never
+      // reach Node as an uncaught exception. See {@link handleChainDeath}
+      // for the guard.
+      (client) => {
+        watchChainClient(client, (error) => { this.handleChainDeath(generation, error) })
+      },
+    )
     this.clients = clients
     this.connected = true
-    this.attachCloseDetection(clients)
     return clients[clients.length - 1] as Client
+  }
+
+  /**
+   * Death handler for one opened chain client of the given generation. Only
+   * the current generation owns the session state: a failed connect attempt
+   * is torn down by openChain itself, a superseding open has already bumped
+   * the generation, and a dispose ends the clients deliberately — all three
+   * are ignored here.
+   */
+  private handleChainDeath(generation: number, error?: Error): void {
+    if (this.disposed || generation !== this.generation) return
+    this.invalidate(error)
+  }
+
+  /**
+   * Drop every cached artifact of a dead connection so the next call reopens:
+   * the ready promise, the shared SFTP channel (its own close/end handlers
+   * also self-invalidate), and the cached login environment. The dead clients
+   * are dropped too — a terminal `'error'`/`'close'` already ended them.
+   *
+   * Public because the exec/run retry path must drop a socket that died before
+   * its `close` event was observed (the `isStaleSocketError` branch); the
+   * `connected` guard keeps a concurrent death handler from double-invalidating.
+   */
+  invalidate(error?: Error): void {
+    if (!this.connected) return
+    this.connected = false
+    this.ready = undefined
+    this.sftp = undefined
+    this.sftpOpening = undefined
+    this.remoteEnvironment = undefined
+    this.clients = []
+    void error
   }
 }

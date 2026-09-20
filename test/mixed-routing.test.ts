@@ -17,7 +17,7 @@ import { LocalFileSystem } from '@deepseek-ai/dsh-fs-local'
 import type { SubprocessHandle, SubprocessSpawnSpec, SubprocessTerminalSpawnSpec } from '@deepseek-ai/dsh-subprocess'
 import type { FsTarget } from '@deepseek-ai/dsh-fs'
 import { FsTargetKey, FsVersion } from '@deepseek-ai/dsh-fs'
-import { sshRoutesRoot } from '../src/transport.ts'
+import { sshRoutesRoot, resolveSshCwd } from '../src/transport.ts'
 import { MixedFileSystem, MixedSubprocessRuntime, remoteArgvOf, worldOfCwd, worldOfTargetKey } from '../src/mixed.ts'
 import type { FileSystemBranch, SubprocessBranch } from '../src/mixed.ts'
 
@@ -38,6 +38,7 @@ test('worldOfCwd: remote cwd spellings resolve remote; local/absent resolve loca
   assert.equal(worldOfCwd('ssh://c1/srv/work'), 'remote')
   assert.equal(worldOfCwd(remotePlaceholder()), 'remote')
   assert.equal(worldOfCwd(remotePlaceholder().replace(/[\\/]dsw-routes$/u, `${'\\'}dsh-ssh-routes`)), 'remote')
+  assert.equal(worldOfCwd('ssh://.git/HEAD'), 'remote')
 })
 
 test('worldOfTargetKey: ssh:// keys are remote; realpath keys are local', () => {
@@ -205,6 +206,10 @@ function stubFileSystemBranch(label: 'local' | 'remote'): FileSystemBranch & { c
       calls.push(`processPath:${label}:${String(target.targetKey)}`)
       return `/world/${label}`
     },
+    processPathFromHostPath(hostPath: string): string | undefined {
+      calls.push(`processPathFromHostPath:${label}:${hostPath}`)
+      return `/host/${label}${hostPath}`
+    },
     fileUrl(target: FsTarget): string {
       calls.push(`fileUrl:${label}:${String(target.targetKey)}`)
       return `file:///world/${label}`
@@ -301,6 +306,17 @@ test('MixedFileSystem: writeText/editText forward the policy to LOCAL only; remo
   assert.deepEqual(local.calls, ['writeText:local', 'editText:local'])
 })
 
+test('BUG-2: host-path mapping never reroutes to the remote branch, even for a remote session', () => {
+  const local = stubFileSystemBranch('local')
+  const remote = stubFileSystemBranch('remote')
+  const mixed = new MixedFileSystem(local, remote as never)
+  const hostPath = join(tmpdir(), 'dsw-bug2-host.png')
+  assert.equal(mixed.processPathFromHostPath(hostPath), `/host/local${hostPath}`)
+  // 这条接缝没有 targetKey/cwd 可路由：宿主文件只属于 local 世界。
+  assert.deepEqual(local.calls, [`processPathFromHostPath:local:${hostPath}`])
+  assert.deepEqual(remote.calls, [])
+})
+
 /* ---------------------------------------------- 4) 本地委托冒烟（不劣化） */
 
 /** 本地 f/s 冒烟：经混合门面的本地分支真实读/写/列表（官方 LocalFileSystem 原实现）。 */
@@ -312,6 +328,9 @@ test('MixedFileSystem: local cwd reads/writes/lists through the real local backe
       throw new Error('remote branch must not be reached for local targets')
     },
     processPath(): string {
+      throw new Error('remote branch must not be reached for local targets')
+    },
+    processPathFromHostPath(): undefined {
       throw new Error('remote branch must not be reached for local targets')
     },
     fileUrl(): string {
@@ -360,4 +379,91 @@ test('MixedFileSystem: local cwd reads/writes/lists through the real local backe
   const dirTarget = await mixed.resolve('.', { cwd: LOCAL_CWD })
   const entries = await mixed.listDir(dirTarget)
   assert.ok(entries.some(entry => entry.name === 'smoke.txt'), 'listDir must observe the written file')
+})
+
+/* --------------------------------- 5) REQ-I11 注册表级路由（无副根也要过远程） */
+
+/**
+ * REQ-I11 (ADR-0021): routing is registry-level. An `ssh://<id>/<path>` path —
+ * or its local placeholder spelling — names the remote world by itself, from a
+ * LOCAL session cwd and with NO side workspace declared. The session's
+ * connected machines are enforced at the tool layer, not here: this face is a
+ * visibility gate, never a fence, and that is exactly what this test pins.
+ */
+test('REQ-I11: a remote spelling routes remote with no side store and a local cwd', async () => {
+  const local = stubFileSystemBranch('local')
+  const remote = stubFileSystemBranch('remote')
+  const mixed = new MixedFileSystem(local, remote as never) // no `sides` accessor at all
+
+  await mixed.resolve('ssh://c2/etc/hosts', { cwd: LOCAL_CWD })
+  assert.deepEqual(remote.calls, ['resolve:remote:/etc/hosts'], 'the ssh:// path decides alone')
+  assert.deepEqual(local.calls, [], 'the local cwd must not win over an explicit remote spelling')
+
+  await mixed.lstat('ssh://c2/etc/hosts', { cwd: LOCAL_CWD })
+  assert.deepEqual(remote.calls.slice(1), ['lstat:remote'])
+  assert.deepEqual(local.calls, [])
+
+  // The local placeholder tree (`<dsh home>/dsw-routes/<id>/…`) is the second
+  // accepted spelling of the same route.
+  await mixed.resolve(join(sshRoutesRoot(), 'c1', 'srv', 'work'), { cwd: LOCAL_CWD })
+  assert.deepEqual(remote.calls.slice(2), ['resolve:remote:/srv/work'])
+  assert.deepEqual(local.calls, [])
+})
+
+/** The looseness is bounded: ordinary local paths never become remote. */
+test('REQ-I11: an ordinary absolute/relative path on a local cwd still routes local', async () => {
+  const local = stubFileSystemBranch('local')
+  const remote = stubFileSystemBranch('remote')
+  const mixed = new MixedFileSystem(local, remote as never)
+
+  await mixed.resolve(join(LOCAL_CWD, 'proj', 'file.txt'), { cwd: LOCAL_CWD })
+  await mixed.resolve('./file.txt', { cwd: LOCAL_CWD })
+  await mixed.lstat('proj/file.txt', { cwd: LOCAL_CWD })
+  assert.deepEqual(local.calls, [
+    `resolve:local:${join(LOCAL_CWD, 'proj', 'file.txt')}`,
+    'resolve:local:./file.txt',
+    'lstat:local',
+  ])
+  assert.deepEqual(remote.calls, [])
+})
+
+test('REQ-I13: remote writeText/editText forward sandboxPolicy', async () => {
+  const seen: unknown[] = []
+  const local = stubFileSystemBranch('local')
+  const remote = stubFileSystemBranch('remote')
+  remote.writeText = async (_target, _content, _expected, _signal, policy) => {
+    seen.push(['write', policy])
+    return { operation: 'create', version: FsVersion('v'), before: null, after: 'x' }
+  }
+  remote.editText = async (_target, _edit, _expected, _signal, policy) => {
+    seen.push(['edit', policy])
+    return { version: FsVersion('v'), before: '', after: 'y' }
+  }
+  const mixed = new MixedFileSystem(local, remote as never)
+  const target = { targetKey: FsTargetKey('ssh://c1/tmp/a.txt'), displayPath: 'ssh://c1/tmp/a.txt' }
+  const policy = { mode: 'danger-full-access' }
+  await mixed.writeText(target, 'x', undefined, undefined, policy)
+  await mixed.editText(target, { oldString: 'a', newString: 'b', replaceAll: false }, undefined, undefined, policy)
+  assert.deepEqual(seen, [['write', policy], ['edit', policy]])
+  assert.deepEqual(local.calls, [])
+})
+
+test('resolveSshCwd: POSIX cwd on a remote initiator binds the registry connection', () => {
+  const ctx = new Context()
+  const t = {
+    endpoint: 'uuz@c1',
+    cwd: '/home/uuz/ssh-test-lab',
+    resolveRemoteCwd: (cwd?: string) => cwd ?? '/home/uuz/ssh-test-lab',
+  }
+  ctx.provide('ssh', t)
+  ctx.provide('sshRegistry', { get: (id: string) => (id === 'c1' ? t : undefined) })
+  ctx.provide('agents', {
+    currentInitiator: () => ({ session: { header: { cwd: 'ssh://c1/home/uuz/ssh-test-lab' } } }),
+  })
+  const posix = resolveSshCwd(ctx, '/home/uuz/ssh-test-lab')
+  assert.equal(posix.connectionId, 'c1')
+  assert.equal(posix.cwd, '/home/uuz/ssh-test-lab')
+  const git = resolveSshCwd(ctx, 'ssh://.git/HEAD')
+  assert.equal(git.connectionId, 'c1')
+  assert.equal(git.cwd, '/home/uuz/ssh-test-lab/.git/HEAD')
 })

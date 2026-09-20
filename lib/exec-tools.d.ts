@@ -3,18 +3,21 @@
  * tool and the win32-host `bash` seam tool.
  *
  * - `sw_exec`: bash/pwsh-tool-aligned command execution ON A NAMED SERVER — a
- *   registry machine id (`c1`, …) or the temporary id of `sw_connect
- *   save:false` — with a `server` parameter plus an optional workdir. The
+ *   registry machine id (`c1`, …) that is CONNECTED TO THIS SESSION
+ *   (REQ-I11 / ADR-0021: the stored `sessionConnections` set ∪ the implicit
+ *   main machine) — with a `server` parameter plus an optional workdir. The
  *   target server's OS is probed once per connection (`uname -s`, falling
  *   back to `cmd /c ver`, then `unknown`) and selects the shell:
  *   `bash -c` (POSIX / unknown) or `pwsh -Command` (win32). Execution goes
  *   through the MIXED subprocess provider with an `ssh://<id>/<path>` cwd, so
- *   the side-workspace exec gate and the machine routing are the same ones
- *   every other spawn uses. Non-zero exits are reported, not errored.
- * - win32 bash: on a Windows host (no local bash, the official bash executor
- *   is not composed) a `bash` tool is registered that runs the session's
- *   REMOTE-Linux command through the same mixed provider; a local session gets
- *   a clear error instead of silently degrading.
+ *   the machine routing is the same one every other spawn uses. Non-zero exits
+ *   are reported, not errored.
+ * - win32 bash (REQ-I16): on a Windows host the official bash executor is
+ *   absent. The tool is **not** registered globally. `agent/created` injects
+ *   it onto `agent.ctx` when the session cwd is a remote (Linux) workspace.
+ *   A local Windows session never sees `bash` in the tool list (use pwsh /
+ *   `sw_exec`). Execute-time still refuses a local workdir if the scoped tool
+ *   is called with one.
  *
  * Everything testable is a pure function or takes a small faceted env
  * (`SwExecEnv`) so unit tests never touch the network.
@@ -22,11 +25,13 @@
  */
 import type { Context } from '@deepseek-ai/cordis';
 import { HarnessError } from '@deepseek-ai/dsh-llm';
-import type { SubprocessHandle, SubprocessSpawnSpec } from '@deepseek-ai/dsh-subprocess';
+import type { SubprocessHandle, SubprocessOutcome, SubprocessSpawnSpec } from '@deepseek-ai/dsh-subprocess';
 import type { SshRegistry } from './registry.ts';
 import type { SshConnectionSpec } from './connection.ts';
 import type { ExecOutcome } from './ssh-core.ts';
 import { type TranslateFn } from './locale/index.ts';
+import type { SessionConnectionsFace } from './session-remote-context.ts';
+import type { SessionSideWorkspaceStore } from './session-workspaces.ts';
 /** The operating-system fact a probed server gets. */
 export type RemoteOs = 'linux' | 'win32' | 'unknown';
 /** Foreground run budget applied when the model omits `timeoutMs` (executor default, dsh-bash-local config). */
@@ -182,15 +187,97 @@ export declare function resolveSwExecCwd(workdir: string | undefined, serverId: 
     machineId: string;
 };
 /**
- * Resolve the target server: a registry id, then the one live TEMPORARY
- * connection (`sw_connect save:false`), then the active/config fallback for
- * an omitted id. Unknown ids fail with the known-id list (S1: unknown server
- * error). v1 has no local server: the local world belongs to bash/pwsh.
+ * Resolve the target server: a registry id, then the active machine for an
+ * omitted id. Unknown ids fail with the known-id list (S1: unknown server
+ * error). Temporary ids are gone with `sw_connect save:false` (ADR-0021 §1/§5),
+ * and the per-session connection gate runs BEFORE this resolver — by the time
+ * it is called, the id is either connected or the implicit main machine.
+ * v1 has no local server: the local world belongs to bash/pwsh.
  */
 export declare function resolveSwExecServer(env: SwExecEnv, serverId: string | undefined, tr?: TranslateFn): {
     connection: SwExecConnection;
     spec: SshConnectionSpec;
 };
+/**
+ * The registry slice a reachability probe needs: one live connection per
+ * registry id. `SshRegistry` satisfies it structurally (its `get` returns a
+ * live `SshConnection`), which keeps the probe testable without a registry.
+ */
+export interface ProbeRegistryFace {
+    get(id: string): {
+        exec(command: string, opts?: {
+            signal?: AbortSignal;
+        }): Promise<ExecOutcome>;
+    } | undefined;
+}
+/** One machine's reachability outcome (plain data — no live objects). */
+export interface MachineProbeResult {
+    id: string;
+    /** Whether `echo ok` came back with exit code 0 inside the budget. */
+    ok: boolean;
+    latencyMs: number;
+    /** Failure reason (model/user-visible); `''` when reachable. */
+    detail: string;
+}
+/** Reachability budget of one machine (mirrors the registry's PROBE_TIMEOUT_MS). */
+export declare const MACHINE_PROBE_TIMEOUT_MS = 8000;
+/**
+ * Probe ONE registry machine with the `echo ok` contract every `sw_*`
+ * connectivity check uses, inside a hard budget. A failed command, a thrown
+ * error (dead/poisoned chain), an unknown id and a timeout are all reported as
+ * `ok: false` + detail — the caller decides whether that is fatal.
+ * @param registry - the registry slice (live connection lookup).
+ * @param id - registry machine id.
+ * @param budgetMs - probe budget (defaults to {@link MACHINE_PROBE_TIMEOUT_MS}).
+ */
+export declare function probeMachine(registry: ProbeRegistryFace, id: string, budgetMs?: number): Promise<MachineProbeResult>;
+/** Probe several machines, preserving the requested order (sequential, bounded each). */
+export declare function probeMachines(registry: ProbeRegistryFace, ids: readonly string[], budgetMs?: number): Promise<MachineProbeResult[]>;
+/**
+ * The per-session connection facts `sw_exec` gates on (ADR-0021 §2.4/§2.5):
+ * the STORED connected set plus the implicit main machine the session's header
+ * cwd routes to. The implicit machine is a read-time union — it is never
+ * written back, so a remote session does not manufacture persisted state just
+ * by running a command.
+ */
+export interface ConnectedMachines {
+    /** The session id the gate ran for (`null` ⇒ unresolvable ⇒ fail closed). */
+    sessionId: string | null;
+    /** Stored ∪ implicit, in that order, deduped. */
+    ids: string[];
+    /** The main-workspace machine id when the cwd routes remote. */
+    implicit: string | null;
+}
+/**
+ * Merge the session's stored connections with the implicit main machine
+ * (ADR-0021 §2.4). Pure and synchronous: the cwd route comes from the header,
+ * the stored set from the `sessionConnections` service.
+ * @param sessionCwd - `session.header.cwd` (any route spelling), if any.
+ * @param sessionId - `session.header.id`, if the carrier exposes it.
+ * @param listFor - the store's `listFor` (absent ⇒ no stored connections).
+ * @param registry - the registry slice used to validate the implicit id.
+ */
+export declare function connectedMachinesOf(sessionCwd: string | undefined, sessionId: string | undefined, listFor: ((sessionId: string) => readonly string[]) | undefined, registry: ProbeRegistryFace): ConnectedMachines;
+/**
+ * REQ-I11 / ADR-0021 §2.5 — the `sw_exec` server gate. The tool stays GLOBALLY
+ * registered (ADR-0021 §3 rejects every scoped/preset alternative for lack of
+ * a per-session scope handle), so the refusal lives here:
+ *
+ * 1. an unresolvable session id → fail closed (A1 unknown #8: never fail open);
+ * 2. no connection at all → "call `sw_connect` first";
+ * 3. a KNOWN registry machine that is not connected to this session → the
+ *    connected ids are listed;
+ * 4. an id the registry does not know → the registry's own "unknown server"
+ *    error with the known-id list (unchanged wording).
+ *
+ * The caller has already resolved `requested` (explicit `server`, else the
+ * implicit main machine), so an untouched explicit id is checked by name.
+ * @param connected - the merged per-session facts.
+ * @param requested - the machine the call names, or `undefined` when it names none.
+ * @param registered - every registry machine id (the known-id list).
+ * @param tr - translator for the refusal messages (host language).
+ */
+export declare function requireConnectedServer(connected: ConnectedMachines, requested: string | undefined, registered: readonly string[], tr?: TranslateFn): void;
 /** A caller-signal + timeout deadline merged into ONE spawn abort signal. */
 export interface SwExecDeadline {
     signal: AbortSignal;
@@ -217,6 +304,25 @@ export declare function resolveSwExecTimeout(timeoutMs: number | undefined): num
  * ABORTED classification.
  */
 export declare function toolAbortError(): HarnessError;
+/** How long a terminated subprocess may take to settle `done` before the tool
+ * call stops waiting: TERM→KILL grace + close-fallback + round-trip slack. */
+export declare const STOP_SETTLE_WINDOW_MS: number;
+/** Marker rejection: the handle ignored TERM/KILL and never settled (BUG-9). */
+export declare class UnsettledStopError extends Error {
+    constructor();
+}
+/**
+ * Await a handle's outcome, but never forever. Once the merged deadline signal
+ * aborts (caller stop or timeout), the handle gets {@link STOP_SETTLE_WINDOW_MS}
+ * to settle; only then does this reject with {@link UnsettledStopError} so the
+ * tool call surfaces a failure instead of hanging on a remote that swallowed
+ * both the signal request and the kill channel (BUG-9: the old code awaited
+ * `handle.done` with no escape — one unresponsive server hung the tool call).
+ * @param done - the subprocess outcome promise.
+ * @param signal - the merged spawn signal (caller abort + timeout).
+ * @param windowMs - settle window after the abort (tests shrink it).
+ */
+export declare function awaitOutcomeOrStop(done: Promise<SubprocessOutcome>, signal: AbortSignal | undefined, windowMs?: number): Promise<SubprocessOutcome>;
 /**
  * The sw_exec core: resolve the server, probe its OS, build the shell argv,
  * and run the command through the mixed provider with an `ssh://` cwd.
@@ -224,7 +330,7 @@ export declare function toolAbortError(): HarnessError;
  * wraps it.
  * @param env - server lookup + spawner (the tool builds it from the registry
  *   and `ctx.subprocess`).
- * @param server - registry/temporary id; `undefined` → the active machine.
+ * @param server - registry machine id; `undefined` → the active machine.
  * @param command - the command text to execute (validated non-empty).
  * @param workdir - already-normalized: `ssh://` verbatim, a POSIX absolute
  *   path (interpreted on `server`), or `undefined` for the server's primary
@@ -275,9 +381,17 @@ export declare function validateBashToolArgs(args: Win32BashArgs, tr?: Translate
  * @param registry - the machine registry accessor (server id lookup).
  * @param opts - `enableRunInBackground` mirrors the official bash flag
  *   (`?? true`); background requires `ctx.jobs` and errors honestly when absent.
+ *   `sides` is the side-workspace store accessor and `connections` the
+ *   connected-machine store accessor: together with the session cwd route they
+ *   decide (a) whether the model-facing section is injected at all
+ *   (REQ-I6 ② + REQ-I11: a local session with no attachments AND no connected
+ *   machine gets zero prompt text) and (b) which servers this session may
+ *   execute on (ADR-0021 §2.5).
  */
 export declare function registerSwExec(ctx: Context, registry: () => SshRegistry, opts?: {
     enableRunInBackground?: boolean;
+    sides?: () => SessionSideWorkspaceStore | undefined;
+    connections?: () => SessionConnectionsFace | undefined;
 }): void;
 /**
  * Resolve the win32 bash tool's cwd with the official resolveWorkdir
@@ -287,19 +401,34 @@ export declare function registerSwExec(ctx: Context, registry: () => SshRegistry
  */
 export declare function resolveWin32BashWorkdir(modelWorkdir: string | undefined, sessionCwd: string | undefined): string | undefined;
 /**
- * Register the win32 bash seam tool plus its `tool:bash` prompt section (S2).
+ * Register the win32 bash seam plus its `tool:bash` prompt section (S2 / REQ-I16).
  * NO-OP on POSIX hosts — the official bash tool owns the `bash` name and the
- * `tool:bash` section there. On Windows (official bash executor absent) the
- * tool is registered; at execution time `worldOfCwd` decides honestly: a
- * remote (Linux) world runs `bash -c` on the server through the mixed
- * provider, a local Windows session errors instead of silently degrading.
+ * `tool:bash` section there. On Windows the section is global (empty unless the
+ * session has a remote workspace). The **tool** is injected per agent when
+ * `agent/created` reports a remote cwd — local Windows sessions do not see it.
  * @param ctx - the mounting context.
  * @param registry - reserved: routing is cwd-based; the accessor keeps the
  *   calling convention uniform with `registerSwExec`.
  * @param options - `platform` injectable for tests; `enableRunInBackground`
- *   mirrors the official bash flag (`?? true`).
+ *   mirrors the official bash flag (`?? true`); `sides` is the side-workspace
+ *   store accessor used by the REQ-I6 ② injection decision; `forceRegister`
+ *   is the test harness that binds the tool on `ctx` immediately.
  */
 export declare function registerWin32Bash(ctx: Context, registry: () => SshRegistry, options?: {
     platform?: NodeJS.Platform;
     enableRunInBackground?: boolean;
+    sides?: () => SessionSideWorkspaceStore | undefined;
+    /**
+     * REQ-I11: the session connection store, so this tool applies the SAME gate
+     * `sw_exec` does. This is the plugin's OWN exec face: without the gate it
+     * would be the one exec surface a model could use to reach a registered but
+     * unconnected machine (the official `bash`/`pwsh` bypass is documented as
+     * structural; ours need not be).
+     */
+    connections?: () => SessionConnectionsFace | undefined;
+    /**
+     * Test harness: bind the tool on `ctx` immediately. Production injects
+     * via `agent/created` onto `agent.ctx` when the session cwd is remote.
+     */
+    forceRegister?: boolean;
 }): void;

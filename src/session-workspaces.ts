@@ -1,26 +1,32 @@
 /**
- * R5: per-session attached side-workspace state — plugin-owned records of
- * extra roots (local directories or remote machine directories) a session may
- * operate on, each with its own permission pair (fs: `r`|`rw`, exec: `on`|`off`).
+ * R5 → REQ-I7: per-session attached side-workspace state — plugin-owned records
+ * of extra roots (local directories or remote machine directories) a session
+ * may operate on. A side root is a THIN DECLARATION (id/kind/rootKey/label):
+ * the per-root permission pair (fs r|rw, exec on|off) was retired with
+ * REQ-I7 (ADR-0019) — after the remote MAIN workspace matured, any absolute
+ * path on the same machine was already reachable from the session, so the
+ * gates only ever restricted, and they were advisory with known bypasses.
  *
  * The core session model is 1 session → 1 immutable header cwd, so the
- * attachments, the per-root permissions, and the routing index all live HERE:
- * one state file (`<dsh home>/dsw-session-workspaces.json`) with two maps —
+ * attachments and the routing index all live HERE: one state file
+ * (`<dsh home>/dsw-session-workspaces.json`) with two maps —
  *
  * - `roots`: rootKey → record (rootKey = canonical key: a `resolve()`d local
- *   absolute path, or `ssh://<machineId>/<posix path>`); ONE record per root,
- *   so the permission of a directory is global — two sessions attaching the
- *   same root share its fs/exec pair.
+ *   absolute path, or `ssh://<machineId>/<posix path>`); ONE record per root;
  * - `sessions`: sessionId → ordered rootKey list (the attachment account;
  *   display and prompt order, no core involvement).
  *
- * Consumers: the mixed subprocess/filesystem providers (path→root permissions
- * and routing), the per-session prompt section (the attached list), and the
+ * Legacy state files that still carry `fs` / `exec` fields on root records
+ * load cleanly: the two fields are ignored on read and dropped on the next
+ * persist (no error, no migration step).
+ *
+ * Consumers: the mixed filesystem provider (path→root ROUTING for
+ * resolve/lstat), the per-session prompt section (the attached list), and the
  * `/dsw` web endpoints (CRUD).
  * @module dsh-workspace-enhancement/session-workspaces
  */
 
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, readFileSync, realpathSync, writeFileSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { basename, dirname, isAbsolute, join, posix, resolve } from 'node:path'
 import { Context, Service } from '@deepseek-ai/cordis'
@@ -32,13 +38,7 @@ import { hostLocaleOf } from './locale/host.ts'
 /** The two attachment kinds a side workspace can be. */
 export type SideWorkspaceKind = 'local' | 'remote'
 
-/** fs permission: `r` rejects every write through the fs seam, `rw` allows it. */
-export type SideFsMode = 'r' | 'rw'
-
-/** exec permission: `off` rejects spawns whose world is the workspace. */
-export type SideExecMode = 'on' | 'off'
-
-/** One side workspace record (canonical rootKey + permission pair). */
+/** One side workspace record (canonical rootKey + display label). */
 export interface SideWorkspaceItem {
   /** Stable anchor (uuid-ish string; not the path — a path may be re-rooted). */
   id: string
@@ -50,8 +50,6 @@ export interface SideWorkspaceItem {
   rootKey: string
   /** Display label (defaults to the basename at attach time). */
   label: string
-  fs: SideFsMode
-  exec: SideExecMode
 }
 
 /** Attach/update payload (paths in any spelling; canonicalized here). */
@@ -60,8 +58,6 @@ export interface SideWorkspaceInput {
   kind: SideWorkspaceKind
   path: string
   label?: string
-  fs?: SideFsMode
-  exec?: SideExecMode
 }
 
 /** The persisted file shape. */
@@ -85,19 +81,50 @@ function normalizeRemoteKey(path: string): string | null {
 }
 
 /**
+ * Canonicalize a LOCAL path the way the fs backends report target keys.
+ *
+ * A lexical `resolve()` is not enough: `dsh-fs-local` hands the facade
+ * realpath-shaped target keys, so a root key stored lexically stops matching as
+ * soon as the two spellings differ — a junction, a `subst` drive, or a win32 8.3
+ * short name (`RUNNER~1` vs `runneradmin`, which is what a CI runner's `%TEMP%`
+ * looks like) is enough to make the root match (and with it the routing) miss
+ * silently.
+ *
+ * Resolve the nearest EXISTING ancestor through `realpath` (the target file
+ * usually does not exist yet) and re-append the remaining segments lexically.
+ */
+function canonicalLocalPath(value: string): string {
+  const absolute = resolve(value)
+  const rest: string[] = []
+  let head = absolute
+  for (;;) {
+    try {
+      const real = realpathSync.native(head)
+      return rest.length === 0 ? real : join(real, ...rest.slice().reverse())
+    } catch {
+      const parent = dirname(head)
+      if (parent === head) return absolute // no existing ancestor (unreachable drive)
+      rest.push(basename(head))
+      head = parent
+    }
+  }
+}
+
+/**
  * Canonicalize one side-workspace path into a root key, or null when the path
  * cannot name a side root: a `remote` kind requires the `ssh://<id>/<abs>`
  * spelling (any POSIX directory spelled through a machine connection), a
  * `local` kind requires an absolute local path. The remote path is
- * posix-normalized; the local path is `resolve()`d lexically (no realpath —
- * symlink fidelity is the browser/stat layer's job).
+ * posix-normalized; the local path is realpath-canonicalized (see
+ * {@link canonicalLocalPath}) so every spelling of the same directory lands on
+ * one key.
  */
 export function normalizeSideRootKey(kind: SideWorkspaceKind, path: string): string | null {
   if (typeof path !== 'string' || path.trim() === '') return null
   const value = path.trim()
   if (kind === 'remote') return normalizeRemoteKey(value)
   if (!isAbsolute(value)) return null
-  return resolve(value)
+  return canonicalLocalPath(value)
 }
 
 /**
@@ -130,7 +157,7 @@ export function sideRootKeyOf(rootKey: string): { kind: SideWorkspaceKind; path:
 function canonicalStoredKey(entry: string): string | null {
   if (entry.startsWith('ssh://')) return normalizeRemoteKey(entry)
   if (!isAbsolute(entry)) return null
-  return resolve(entry)
+  return canonicalLocalPath(entry)
 }
 
 /** The path separator a stored root key canonically uses. */
@@ -176,7 +203,7 @@ function bestMatchingRoot(
  *
  * - remote routes: `ssh://<id>/<path>` AND the local placeholder trees
  *   (`dsw-routes/<id>/…`, legacy `dsh-ssh-routes/<id>/…`) — a remote session's
- *   spawn cwd is a placeholder, so the exec gate must see the same root;
+ *   cwd is a placeholder, so path routing must see the same root;
  * - absolute local paths (win32: case-insensitive comparison, NTFS-realpath
  *   targetKeys vs lexical attach spellings);
  * - win32 bare POSIX-absolute paths: remote-by-spelling (the R4 worldOfCwd
@@ -220,7 +247,10 @@ export function sideWorkspaceOf(
     return best
   }
   if (isAbsolute(value)) {
-    const key = resolve(value)
+    // Realpath-canonical key: the fs layer reports realpath-shaped target keys,
+    // so a lexical `resolve()` here would miss every junction/short-name
+    // spelling and route the operation to the wrong world.
+    const key = canonicalLocalPath(value)
     const insensitive = process.platform === 'win32'
     return bestMatchingRoot(roots, root => !root.startsWith('ssh://') && isUnderRoot(root, key, insensitive))
   }
@@ -242,9 +272,9 @@ export function normalizeSideWorkspaceRecord(raw: unknown): SideWorkspaceItem | 
   const parsed = sideRootKeyOf(rootKey)
   if (parsed === null || parsed.kind !== record.kind) return null
   const label = typeof record.label === 'string' && record.label.trim() !== '' ? record.label.trim() : basenameLabel(record.kind, parsed.path)
-  const fs: SideFsMode = record.fs === 'r' ? 'r' : 'rw'
-  const exec: SideExecMode = record.exec === 'off' ? 'off' : 'on'
-  return { id: record.id, kind: record.kind, rootKey, label, fs, exec }
+  // REQ-I7 (ADR-0019): legacy `fs` / `exec` permission fields are ignored
+  // when present — no error, no migration; the next persist drops them.
+  return { id: record.id, kind: record.kind, rootKey, label }
 }
 
 /** Default display label for a root (last path segment, remote uses the POSIX part). */
@@ -296,7 +326,7 @@ export function allocateSideId(): string {
 /**
  * Session-attached side workspace store (cordis service `sideWorkspaces`).
  * Owns the durable attachment state; pure path matching lives in the exported
- * helpers so the mixed providers can gate without touching this class.
+ * helpers so the mixed providers can route without touching this class.
  */
 export class SessionSideWorkspaceStore extends Service {
   private readonly file: string
@@ -340,8 +370,11 @@ export class SessionSideWorkspaceStore extends Service {
     return this.roots.get(rootKey)
   }
 
-  /** The longest owning record of one operation path (routing/permission). */
+  /** The longest owning record of one operation path (routing index). */
   match(path: string): SideWorkspaceItem | undefined {
+    // Short-circuit: with no side workspace the matcher must not touch the
+    // filesystem (canonicalLocalPath does a realpath probe) on every fs call.
+    if (this.roots.size === 0) return undefined
     return sideWorkspaceOf(this.roots, path)
   }
 
@@ -373,16 +406,12 @@ export class SessionSideWorkspaceStore extends Service {
       ? {
           ...existing,
           ...(labelValue !== '' ? { label: labelValue } : {}),
-          ...(input.fs !== undefined ? { fs: input.fs } : {}),
-          ...(input.exec !== undefined ? { exec: input.exec } : {}),
         }
       : {
           id,
           kind: input.kind,
           rootKey,
           label: labelValue !== '' ? labelValue : (parsed !== null ? basenameLabel(input.kind, parsed.path) : id),
-          fs: input.fs ?? 'rw',
-          exec: input.exec ?? 'on',
         }
     this.roots.set(rootKey, item)
     const sid = sessionId.trim()
@@ -409,15 +438,13 @@ export class SessionSideWorkspaceStore extends Service {
     return true
   }
 
-  /** Update a root's presentation/permission fields (undefined keeps the value). */
-  update(rootKey: string, patch: { label?: string; fs?: SideFsMode; exec?: SideExecMode }): boolean {
+  /** Update a root's presentation field (undefined keeps the value). */
+  update(rootKey: string, patch: { label?: string }): boolean {
     const item = this.roots.get(rootKey)
     if (item === undefined) return false
     this.roots.set(rootKey, {
       ...item,
       ...(patch.label !== undefined && patch.label.trim() !== '' ? { label: patch.label.trim() } : {}),
-      ...(patch.fs !== undefined ? { fs: patch.fs } : {}),
-      ...(patch.exec !== undefined ? { exec: patch.exec } : {}),
     })
     void this.persist()
     return true

@@ -43,8 +43,21 @@
 
 import type { WireResult } from './index.ts'
 import type { TranslateNS } from '@deepseek-ai/dsh-client-ui-slots'
+import { routeIdOf } from './route-id.ts'
 import { CONN_STATE_COLOR, CONN_STATE_LABEL_KEY, zhBaseline } from './status.tsx'
 import type { ConnStatusView } from './status.tsx'
+
+// The route-placeholder rule now lives in its own `.ts` module (t4): the header
+// remote-status entry needs it too, and the sandbox test runner cannot load
+// `.tsx` — not even transitively — so this layer's `status.tsx` import would
+// have dragged it out of test coverage. Pure move, same function body; the
+// export name is unchanged for every existing consumer.
+export { routeIdOf }
+
+// REQ-I9 (ADR-0022 D1): the fence badge projection lives in `sandbox-badge.ts`
+// for the SAME reason (the row-badges module is not sandbox-test-loadable);
+// re-exported here so the badge surface keeps one import point.
+export { sandboxBadgeOf } from './sandbox-badge.ts'
 
 /**
  * The ONE row status-marker key: `data-dsw-conn-id` is the idempotence guard
@@ -162,19 +175,6 @@ export function badgeTextsOf(view: ConnStatusView, compact: boolean, t: Translat
     buttonText: compact ? t('status.retryAction.compact') : t('status.retryAction.recheck'),
     buttonTitle: t('status.retryAction.title'),
   }
-}
-
-/**
- * Recover the registry connection id from a route placeholder path
- * (`.../dsw-routes/<id>/<remote path>` or the legacy `dsh-ssh-routes/` tree).
- * Mirrors the host's routeFromPlaceholder root/id rules.
- */
-export function routeIdOf(path: string): string | undefined {
-  const match = /(?:dsw-routes|dsh-ssh-routes)[\\/]([^\\/]+)/i.exec(path)
-  if (match === null) return undefined
-  const id = match[1]
-  if (id === undefined || !/^[A-Za-z0-9._-]+$/.test(id)) return undefined
-  return id
 }
 
 const STATUS_FRESH_MS = 5_000

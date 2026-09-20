@@ -42,7 +42,10 @@
  */
 import type { WireResult } from './index.ts';
 import type { TranslateNS } from '@deepseek-ai/dsh-client-ui-slots';
+import { routeIdOf } from './route-id.ts';
 import type { ConnStatusView } from './status.tsx';
+export { routeIdOf };
+export { sandboxBadgeOf } from './sandbox-badge.ts';
 /**
  * The ONE row status-marker key: `data-dsw-conn-id` is the idempotence guard
  * (a row already marked for a connection is skipped) AND the paintConn match
@@ -118,12 +121,6 @@ export interface BadgeTexts {
  * @param t - the translate seat (active language).
  */
 export declare function badgeTextsOf(view: ConnStatusView, compact: boolean, t: TranslateNS<'dsw'>): BadgeTexts;
-/**
- * Recover the registry connection id from a route placeholder path
- * (`.../dsw-routes/<id>/<remote path>` or the legacy `dsh-ssh-routes/` tree).
- * Mirrors the host's routeFromPlaceholder root/id rules.
- */
-export declare function routeIdOf(path: string): string | undefined;
 /**
  * C3: grouped-view index — remote workspace title → connection id.
  *
@@ -224,4 +221,3 @@ export declare function isOwnBadgeMutation(target: Node | {
  *   baseline (pure-helper/test callers keep the pre-i18n texts).
  */
 export declare function installRowBadges(rpc: RowBadgeRpc, sources: RowBadgeSources, subscribe: (onChange: () => void) => () => void, locale?: RowBadgeLocale): () => void;
-export {};

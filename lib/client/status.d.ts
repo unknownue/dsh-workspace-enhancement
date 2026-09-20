@@ -69,10 +69,22 @@ export declare function useConnStatus(center: StatusCenter | null, id: string | 
  * frozen zh-only snapshot only ever threatened to drift from the dictionary.
  */
 export declare const CONN_STATE_LABEL_KEY: Record<ConnState, DswKey>;
+/**
+ * Literal dot colors for the DOM row-badge layer (`row-badges.ts` /
+ * `remote-status-entry.tsx`), which injects into host DOM nodes and therefore
+ * cannot address a CSS module class. These mirror the semantic tokens the
+ * React badge resolves through `status.module.css`
+ * (`--dsw-alias-state-success-primary` = green-500 in both themes,
+ * `--dsw-alias-label-caption` for the unknown state); `offline` takes the
+ * red-400 step so the dot stays legible on both panel fills.
+ */
 export declare const CONN_STATE_COLOR: Record<ConnState, string>;
 /**
  * The tri-state badge: colored dot + label, and (unless `compact`) the
  * "re-check and try to connect" button shown for unknown/offline entries.
+ * Styling lives in `status.module.css` and rides the host's semantic state
+ * tokens, so a machine here reads the same green/red as a configured provider
+ * does in the host's own settings sections.
  */
 export declare function ConnStatusBadge({ id, rpc, center, compact, t: tSeat, }: {
     id: string;

@@ -1,17 +1,18 @@
 /**
  * Web-facing RPC channel of dsh-workspace-enhancement: mounts the connection
- * registry and registers the `/dsw` unary channel on the shared web transport.
- * Host/Origin fencing is the connection service's global loopback-and-trusted
- * check, so the channel carries no per-route authority anymore (dropped in
- * `dsh 0.1.5`). The client half drives connection management
- * and remote directory browsing through it; endpoints are plain JSON. Remote
- * listing shares one level walk with the directory-picker backend
+ * registry and registers the plugin's unary channel as exact Fetch routes on the
+ * shared `/api` transport (the loopback/Host fence and the browser-session check
+ * are applied by that transport, not here). The client half drives connection
+ * management and remote directory browsing through it; endpoints are plain JSON.
+ * Remote listing shares one level walk with the directory-picker backend
  * ({@link module:dsh-workspace-enhancement/listing}).
+ *
+ * The wire identity (channel path, namespace, envelope) lives in
+ * `./web-channel.ts`, which the client half imports too.
  * @module dsh-workspace-enhancement/web
  */
 
 import { mkdir, rm } from 'node:fs/promises'
-import type { IncomingMessage, ServerResponse } from 'node:http'
 import { posix } from 'node:path'
 import type { Stats } from 'ssh2'
 import type { Context } from '@deepseek-ai/cordis'
@@ -24,10 +25,19 @@ import type { HostKeyMode } from './hostkey.ts'
 import { registerWorkspaceTools } from './tools.ts'
 import { sshRoutePlaceholder } from './transport.ts'
 import { parseSshRoute } from './registry.ts'
-import { listRemoteLevel, remoteHome as sharedRemoteHome } from './listing.ts'
+import { listRemoteLevel, listRemoteLevelViaCore, mkdirRemoteViaCore, remoteHome as sharedRemoteHome } from './listing.ts'
+import { SessionMachineConnections, normalizeMachineIds } from './session-connections.ts'
 import type { SessionSideWorkspaceStore, SideWorkspaceInput } from './session-workspaces.ts'
 import { normalizeSideRootKey, remoteSideRootKey } from './session-workspaces.ts'
+import type { SessionConnectionsFace } from './session-remote-context.ts'
 import { hostLocaleOf } from './locale/host.ts'
+import { channelRouteOf, isAlreadyRegistered } from './web-channel.ts'
+import type { ChannelDispatch, ChannelResult, ChannelRoute } from './web-channel.ts'
+import { ensureCoreHub } from './core-hub.ts'
+import type { CoreHub } from './core-hub.ts'
+import { deployCore } from './core-deploy.ts'
+import { isCoreMissingError } from './remote-policy.ts'
+import type { SshTransport } from './transport.ts'
 
 /** Channel config. */
 export interface WebChannelConfig extends RegistryConfig {
@@ -35,10 +45,7 @@ export interface WebChannelConfig extends RegistryConfig {
   maxEntries?: number
 }
 
-/** The unary RPC result shape the shared transport expects. */
-export type ChannelResult =
-  | { ok: true; value: unknown }
-  | { ok: false; error: { code: string; message: string; details?: Record<string, unknown> } }
+export type { ChannelResult } from './web-channel.ts'
 
 /** One wire directory row / crumb. */
 interface WireEntry {
@@ -58,33 +65,24 @@ interface WireListing {
 
 declare module '@deepseek-ai/cordis' {
   interface Context {
-    /** Host connection transport; the shared RPC channel registry lives here. */
-    connection: {
-      rpc: {
-        handle(
-          channel: string,
-          handler: (endpoint: string, payload: unknown, signal: AbortSignal) => Promise<ChannelResult>,
-        ): () => Promise<void>
-      }
-    }
     /**
-     * Host HTTP route registry. The connection transport mounts every channel
-     * route here, so a channel owner must inject this service (`dsh 0.1.5`;
-     * earlier builds read it off the connection service and needed no
-     * injection). See {@link mountChannel} for the owning-context subtlety.
+     * Host connection transport. Only the surface this row uses is declared —
+     * the exact Fetch-route registry on the shared `/api` channel, mirrored from
+     * `@deepseek-ai/dsh-client-connection`'s `HostConnectionFetch` /
+     * `ConnectionFetchRoute` types. `connection.rpc.handle` is deliberately NOT
+     * declared: it is unusable on the 0.1.5 line (see `./web-channel.ts`), and
+     * leaving it out keeps it from creeping back in.
      */
-    webServer: {
-      register(route: {
-        kind: 'exact' | 'prefix'
-        path: string
-        handler: (req: IncomingMessage, res: ServerResponse) => void | Promise<void>
-      }): () => void
+    connection: {
+      fetch: {
+        register(route: ChannelRoute): () => Promise<void>
+      }
     }
   }
 }
 
 /** Required host services: the web transport + the tools/system-prompt registry. */
-export const inject = ['connection', 'webServer', 'tools', 'systemPrompt']
+export const inject = ['connection', 'tools', 'systemPrompt']
 
 /** Validated channel config. */
 export const Config: z<WebChannelConfig> = z.object({
@@ -160,7 +158,8 @@ function isConnectionInput(value: unknown): value is ConnectionInput {
 const isHostKeyMode = (value: unknown): value is HostKeyMode =>
   value === 'accept-new' || value === 'verify' || value === 'off'
 
-/** Machine add payload (legacy connection input + dsh-remote machine fields). */function isMachineInput(value: unknown): value is MachineInput {
+/** Machine add payload (legacy connection input + dsh-remote machine fields). */
+function isMachineInput(value: unknown): value is MachineInput {
   if (!isConnectionInput(value)) return false
   if (!isRecord(value)) return false
   if (value.id !== undefined && !isString(value.id)) return false
@@ -170,6 +169,14 @@ const isHostKeyMode = (value: unknown): value is HostKeyMode =>
   if (value.credentialBackend !== undefined
     && value.credentialBackend !== 'plain' && value.credentialBackend !== 'keychain'
     && value.credentialBackend !== 'windows' && value.credentialBackend !== 'secret') return false
+  if (value.remoteApproval !== undefined
+    && value.remoteApproval !== 'off' && value.remoteApproval !== 'human' && value.remoteApproval !== 'ai') return false
+  // REQ-I9 (ADR-0022 D1): the per-machine remote sandbox fence mode. Same
+  // closed whitelist treatment as `remoteApproval` — an unknown spelling is a
+  // bad request, never a silently-coerced `'off'` (a typo that disabled the
+  // fence must not look like a successful save).
+  if (value.remoteSandbox !== undefined
+    && value.remoteSandbox !== 'off' && value.remoteSandbox !== 'read-only' && value.remoteSandbox !== 'workspace-write') return false
   return true
 }
 
@@ -182,7 +189,13 @@ function isHostKeyForgetPayload(value: unknown): value is { id?: string; host?: 
   return value.id !== undefined || value.host !== undefined
 }
 
-/** Side-workspace add payload: `{ sessionId, id?, kind, path, label?, fs?, exec? }`. */
+/**
+ * Side-workspace add payload: `{ sessionId, id?, kind, path, label? }`.
+ *
+ * Lenient whitelist: unknown keys (e.g. legacy `fs`/`exec` from clients
+ * ≤0.1.3) pass validation and are dropped by the attach call — the request
+ * is accepted, not rejected (ADR-0019 §3).
+ */
 function isSideWorkspaceAddPayload(value: unknown): value is SideWorkspaceInput & { sessionId: string } {
   if (!isRecord(value)) return false
   if (!isString(value.sessionId) || value.sessionId.trim() === '') return false
@@ -191,9 +204,27 @@ function isSideWorkspaceAddPayload(value: unknown): value is SideWorkspaceInput 
   for (const key of ['id', 'label'] as const) {
     if (value[key] !== undefined && !isString(value[key])) return false
   }
-  if (value.fs !== undefined && value.fs !== 'r' && value.fs !== 'rw') return false
-  if (value.exec !== undefined && value.exec !== 'on' && value.exec !== 'off') return false
   return true
+}
+
+/** REQ-I11 `session.conn.*` payload: `{ sessionId, id }` (one machine). */
+function isSessionConnIdPayload(value: unknown): value is { sessionId: string; id: string } {
+  return isRecord(value)
+    && isString(value.sessionId) && value.sessionId.trim() !== ''
+    && isString(value.id) && value.id.trim() !== ''
+}
+
+/** REQ-I11 `session.conn.list` payload: `{ sessionId }`. */
+function isSessionConnListPayload(value: unknown): value is { sessionId: string } {
+  return isRecord(value) && isString(value.sessionId) && value.sessionId.trim() !== ''
+}
+
+/** REQ-I11 `session.conn.set` payload: `{ sessionId, ids: string[] }` (replace form). */
+function isSessionConnSetPayload(value: unknown): value is { sessionId: string; ids: string[] } {
+  if (!isRecord(value)) return false
+  if (!isString(value.sessionId) || value.sessionId.trim() === '') return false
+  if (!Array.isArray(value.ids)) return false
+  return value.ids.every(entry => isString(entry))
 }
 
 /** Side-workspace detach/update payload: `{ sessionId, rootKey }` / `{ rootKey, ...patch }`. */
@@ -202,13 +233,16 @@ function isSideWorkspaceKeyPayload(value: unknown): value is { sessionId?: strin
     && (value.sessionId === undefined || isString(value.sessionId))
 }
 
-/** Side-workspace update payload: `{ rootKey, label?, fs?, exec? }`. */
-function isSideWorkspaceUpdatePayload(value: unknown): value is { rootKey: string; label?: string; fs?: 'r' | 'rw'; exec?: 'on' | 'off' } {
+/**
+ * Side-workspace update payload: `{ rootKey, label? }`.
+ *
+ * Same lenient whitelist as the add guard: unknown keys such as legacy
+ * `fs`/`exec` are ignored and the request is accepted (ADR-0019 §3).
+ */
+function isSideWorkspaceUpdatePayload(value: unknown): value is { rootKey: string; label?: string } {
   if (!isSideWorkspaceKeyPayload(value)) return false
-  const record = value as { rootKey: string; label?: unknown; fs?: unknown; exec?: unknown }
+  const record = value as { rootKey: string; label?: unknown }
   if (record.label !== undefined && !isString(record.label)) return false
-  if (record.fs !== undefined && record.fs !== 'r' && record.fs !== 'rw') return false
-  if (record.exec !== undefined && record.exec !== 'on' && record.exec !== 'off') return false
   return true
 }
 
@@ -226,7 +260,58 @@ const wireError = (code: string, message: string): ChannelResult => {
 }
 
 /**
- * Mount the connection registry and the `/dsw` channel.
+ * Every endpoint this row serves, in one place.
+ *
+ * The dispatch switch below is the implementation and this list is the mount
+ * surface, so the two can drift; `test/web-channel.test.ts` reads this file and
+ * fails when a `case 'x':` is not listed here (or vice versa).
+ */
+export const CHANNEL_ENDPOINTS = [
+  'connections.list',
+  'config.hosts',
+  'connections.resolve',
+  'connections.add',
+  'connections.remove',
+  'connections.test',
+  'machines.list',
+  'machines.current',
+  'machines.setCurrent',
+  'machines.add',
+  'machines.remove',
+  'machines.test',
+  'hostkey.forget',
+  'status',
+  'conn.status',
+  'conn.probe',
+  'conn.reconnect',
+  'browse.home',
+  'browse.list',
+  'browse.mkdir',
+  'session.route',
+  'local.pickNative',
+  'session.ws.list',
+  'session.ws.add',
+  'session.ws.update',
+  'session.ws.remove',
+  'session.conn.list',
+  'session.conn.connect',
+  'session.conn.disconnect',
+  'session.conn.set',
+  'core.deploy',
+  'core.status',
+] as const
+
+/**
+ * Live dispatch per endpoint, refreshed by every {@link apply}.
+ *
+ * A route registered by a PREVIOUS apply can survive a plugin reload (see
+ * {@link isAlreadyRegistered}); routing through this map keeps it serving the
+ * newest host code instead of a stale closure.
+ */
+const liveDispatch = new Map<string, ChannelDispatch>()
+
+/**
+ * Mount the connection registry and this row's `/api/dsw/*` channel.
  * @param ctx - the mounting Cordis context.
  * @param config - state file and listing bound.
  */
@@ -256,6 +341,16 @@ export function apply(ctx: Context, config: WebChannelConfig): void {
     if (value === undefined) throw new Error(`dsw: ${t('rpc.sideStoreNotMounted')}`)
     return value
   }
+  /**
+   * REQ-I11: the per-session connected-machine store. Constructed HERE (this row
+   * owns the tools AND the channel, so tool and panel write one instance) right
+   * next to the workspace tools; it self-registers as the `sessionConnections`
+   * cordis service. The accessor is optional-service style (`ctx.get(..., false)`)
+   * like `sideWorkspaces`, so a composition that never mounts this row degrades
+   * to "no session connections" instead of failing assembly.
+   */
+  void new SessionMachineConnections(ctx)
+  const hub = (): CoreHub => ensureCoreHub(ctx)
   /** R5: a remote side workspace must name a registered machine. */
   const requireRemoteMachine = (rootKey: string): void => {
     const route = parseSshRoute(rootKey)
@@ -266,26 +361,69 @@ export function apply(ctx: Context, config: WebChannelConfig): void {
       throw new Error(`dsw: ${t('rpc.unknownMachine', { id: route.id })}`)
     }
   }
+  /**
+   * REQ-I11: the connected-machine store the `session.conn.*` endpoints write —
+   * the SAME service the `sw_connect` tool and the prompt contributions read, so
+   * the panel toggle and the model can never disagree (ADR-0021 §0/§2.9).
+   */
+  const connStore = (): SessionConnectionsFace => {
+    const value = ctx.get('sessionConnections', false) as SessionConnectionsFace | undefined
+    if (value === undefined) throw new Error(`dsw: ${t('rpc.connStoreNotMounted')}`)
+    return value
+  }
+  /** REQ-I11: every named machine must be in the registry (the machine universe). */
+  const requireRegisteredMachines = (ids: readonly string[]): string[] => {
+    const normalized = normalizeMachineIds(ids)
+    const known = registry().listMachines().machines.map(machine => machine.id)
+    const unknown = normalized.filter(id => !known.includes(id))
+    if (unknown.length > 0) {
+      throw new Error(`dsw: ${t('rpc.connUnknownMachine', {
+        ids: unknown.join(', '),
+        known: known.length > 0 ? known.join(', ') : t('rpc.connNoKnownMachines'),
+      })}`)
+    }
+    return normalized
+  }
+  /** The `{ items }` shape the client half reads (ids only, never endpoints). */
+  const connItems = (sessionId: string): { items: string[] } => ({ items: [...connStore().listFor(sessionId)] })
 
   /** The remote home directory: the login environment's HOME, else the spec cwd. */
   const remoteHome = async (id: string, signal?: AbortSignal): Promise<string> => {
     return sharedRemoteHome(requireConnection(id), signal)
   }
 
-  /** List one remote level over the connection's shared SFTP channel. */
+  const operatorCore = async (id: string, path: string, signal?: AbortSignal) => {
+    try {
+      return await hub().require(id, {
+        path,
+        policy: 'danger-full-access',
+        ...(signal !== undefined ? { signal } : {}),
+      })
+    } catch (error) {
+      if (isCoreMissingError(error)) return undefined
+      throw error
+    }
+  }
+
+  /** List one remote level: core RPC when a Linux core is up, else SFTP. */
   const listRemote = async (id: string, target: string | undefined, signal?: AbortSignal): Promise<WireListing> => {
     const connection = requireConnection(id)
     const resolvedTarget = target ?? await sharedRemoteHome(connection, signal)
     if (!posix.isAbsolute(resolvedTarget)) {
       throw new Error(`dsw: ${t('rpc.cannotList', { target: resolvedTarget })}`)
     }
+    const home = await sharedRemoteHome(connection, signal)
+    const client = await operatorCore(id, resolvedTarget, signal)
+    if (client !== undefined) {
+      return listRemoteLevelViaCore(client, resolvedTarget, maxEntries, { signal, home })
+    }
     return listRemoteLevel(connection, resolvedTarget, maxEntries, {
       signal,
-      home: await sharedRemoteHome(connection, signal),
+      home,
     })
   }
 
-  /** Create one child directory on the remote host (SFTP mkdir, non-recursive). */
+  /** Create one child directory: core RPC when fenced, SFTP when `off`. */
   const createRemoteDirectory = async (id: string, path: string, name: string, signal?: AbortSignal): Promise<string> => {
     if (!posix.isAbsolute(path)) throw new Error(`dsw: ${t('rpc.cannotCreate', { path: JSON.stringify(path) })}`)
     if (name.trim() === '' || name === '.' || name === '..' || /[/\\]/.test(name)) {
@@ -293,6 +431,17 @@ export function apply(ctx: Context, config: WebChannelConfig): void {
     }
     const target = posix.join(path, name)
     const connection = requireConnection(id)
+    const client = await operatorCore(id, path, signal)
+    if (client !== undefined) {
+      try {
+        await mkdirRemoteViaCore(client, path, name, signal)
+      } catch (error) {
+        const text = error instanceof Error ? error.message : String(error)
+        if (/EEXIST|exists/i.test(text)) throw new Error(`dsw: ${t('rpc.alreadyExists', { target })}`)
+        throw error
+      }
+      return target
+    }
     const sftp = await connection.getSftp(signal)
     const existing = await new Promise<Stats | undefined>((resolvePromise) => {
       sftp.lstat(target, (error, value) => { resolvePromise(error === undefined ? value : undefined) })
@@ -369,12 +518,17 @@ export function apply(ctx: Context, config: WebChannelConfig): void {
         }
         case 'machines.remove': {
           const input = requirePayload(payload, isIdPayload, 'machines.remove')
+          hub().close(input.id.trim())
           const removed = registry().remove(input.id.trim())
           if (removed) {
             // Drop the connection's local route placeholders; stale ones would
             // route to a dead registry id on the next session resume.
             void rm(sshRoutePlaceholder(input.id.trim(), '/'), { recursive: true, force: true })
               .catch(() => undefined)
+            // REQ-I11 (ADR-0021 §2.3): a deleted machine must not stay "connected"
+            // to any session. The store keeps id references only, so pruning them
+            // here is the one place that can know the id is gone.
+            connStore().retain(new Set(registry().listMachines().machines.map(machine => machine.id)))
           }
           return { ok: true, value: { ok: true, removed, ...registry().listMachines() } }
         }
@@ -422,6 +576,7 @@ export function apply(ctx: Context, config: WebChannelConfig): void {
           // rebuild a fresh one, and probe it. A failure is an offline status,
           // not an RPC error.
           const input = requirePayload(payload, isIdPayload, 'conn.reconnect')
+          hub().close(input.id.trim())
           const status = await registry().reconnect(input.id.trim(), signal)
           if (status === undefined) throw new Error('bad-request: unknown connection id')
           return { ok: true, value: status }
@@ -505,8 +660,6 @@ export function apply(ctx: Context, config: WebChannelConfig): void {
             kind: input.kind,
             path: attachPath,
             ...(input.label !== undefined ? { label: input.label } : {}),
-            ...(input.fs !== undefined ? { fs: input.fs } : {}),
-            ...(input.exec !== undefined ? { exec: input.exec } : {}),
           })
           return { ok: true, value: { item } }
         }
@@ -514,8 +667,6 @@ export function apply(ctx: Context, config: WebChannelConfig): void {
           const input = requirePayload(payload, isSideWorkspaceUpdatePayload, 'session.ws.update')
           const updated = sides().update(input.rootKey, {
             ...(input.label !== undefined ? { label: input.label } : {}),
-            ...(input.fs !== undefined ? { fs: input.fs } : {}),
-            ...(input.exec !== undefined ? { exec: input.exec } : {}),
           })
           if (!updated) throw new Error('bad-request: session.ws.update names an unknown root')
           return { ok: true, value: { item: sides().get(input.rootKey) } }
@@ -527,6 +678,54 @@ export function apply(ctx: Context, config: WebChannelConfig): void {
           }
           return { ok: true, value: { removed: sides().detach(input.sessionId, input.rootKey) } }
         }
+        case 'session.conn.list': {
+          // REQ-I11: the session's CONNECTED machine ids — `{ items: string[] }`
+          // exactly; the client panel is written against this shape.
+          const input = requirePayload(payload, isSessionConnListPayload, 'session.conn.list')
+          return { ok: true, value: connItems(input.sessionId.trim()) }
+        }
+        case 'session.conn.connect': {
+          // One panel toggle ON. It writes the store directly (no ping): the
+          // store is the single session truth, and the client already has
+          // `conn.probe` for connectivity display. Machine ids are validated
+          // against the registry — the same universe `sw_connect` accepts.
+          const input = requirePayload(payload, isSessionConnIdPayload, 'session.conn.connect')
+          const [id] = requireRegisteredMachines([input.id])
+          if (id === undefined) throw new Error(`dsw: ${t('rpc.connMachineEmpty')}`)
+          connStore().connect(input.sessionId.trim(), id)
+          return { ok: true, value: connItems(input.sessionId.trim()) }
+        }
+        case 'session.conn.disconnect': {
+          const input = requirePayload(payload, isSessionConnIdPayload, 'session.conn.disconnect')
+          const [id] = requireRegisteredMachines([input.id])
+          if (id === undefined) throw new Error(`dsw: ${t('rpc.connMachineEmpty')}`)
+          connStore().disconnect(input.sessionId.trim(), id)
+          return { ok: true, value: connItems(input.sessionId.trim()) }
+        }
+        case 'session.conn.set': {
+          // The replace form (same semantics as `sw_connect(machines: …)`),
+          // including `ids: []` = disconnect everything.
+          const input = requirePayload(payload, isSessionConnSetPayload, 'session.conn.set')
+          const ids = requireRegisteredMachines(input.ids)
+          connStore().set(input.sessionId.trim(), ids)
+          return { ok: true, value: connItems(input.sessionId.trim()) }
+        }
+        case 'core.status': {
+          const input = requirePayload(payload, isIdPayload, 'core.status')
+          const id = input.id.trim()
+          requireConnection(id)
+          // BUG-6: one source of truth (`CoreHub.status` probes the installed
+          // artifact). Probing here as well could only disagree with itself.
+          return { ok: true, value: await hub().status(id, signal) }
+        }
+        case 'core.deploy': {
+          const input = requirePayload(payload, isIdPayload, 'core.deploy')
+          const id = input.id.trim()
+          const connection = requireConnection(id)
+          const view = await deployCore(connection as unknown as SshTransport, { signal })
+          hub().close(id)
+          return { ok: true, value: view }
+        }
         default:
           throw new Error(`bad-request: unknown endpoint ${JSON.stringify(endpoint)}`)
       }
@@ -537,47 +736,38 @@ export function apply(ctx: Context, config: WebChannelConfig): void {
     }
   }
 
-  const dispose = mountChannel(ctx, dispatch)
-  ctx.effect(() => dispose, 'dsw: /dsw rpc channel')
-  registerWorkspaceTools(ctx, registry, () => ctx.get('sideWorkspaces', false) as SessionSideWorkspaceStore | undefined)
-}
-
-/** Absolute channel prefix the client half calls through. */
-const CHANNEL = '/dsw'
-
-/** Decoded-endpoint handler shape the connection transport expects. */
-type ChannelDispatch = (endpoint: string, payload: unknown, signal: AbortSignal) => Promise<ChannelResult>
-
-/**
- * Mount the `/dsw` channel on the shared connection transport.
- *
- * `connection.rpc.handle()` is the documented seam, but it is unusable on
- * `dsh 0.1.5`: its owning context is a cordis *shadow* whose service
- * resolution starts at the connection plugin's own fiber
- * (`dsh-client-connection/lib/index.js` — `get rpc()` captures `this.ctx`,
- * and `createShadow` rebinds that to the service's context). That fiber
- * injects only `credentials`, and 0.1.5 moved `webServer` into a nested
- * `ctx.inject` below it, so the walk never reaches the service and every
- * caller gets `cannot get property "webServer" without inject` — regardless
- * of what the caller injects.
- *
- * `register(owner, channel, handler)` is the same body with the owner passed
- * in explicitly, so it works with our own context, where `webServer` does
- * resolve. It is unexported upstream, hence the structural probe; the public
- * seam is tried first so a fixed harness needs no change here.
- *
- * @param ctx - plugin context, which must inject `connection` and `webServer`.
- * @param dispatch - decoded-endpoint handler.
- * @returns the disposer removing the channel.
- */
-function mountChannel(ctx: Context, dispatch: ChannelDispatch): () => Promise<void> | void {
-  try {
-    return ctx.connection.rpc.handle(CHANNEL, dispatch)
-  } catch (error) {
-    const internal = ctx.connection as unknown as {
-      register?: (owner: Context, channel: string, handler: ChannelDispatch) => () => Promise<void>
-    }
-    if (typeof internal.register !== 'function' || internal.register.length < 3) throw error
-    return internal.register(ctx, CHANNEL, dispatch)
+  // The channel rides the official shared `/api` transport as exact Fetch
+  // routes. `connection.fetch.register` only touches the Connection service's
+  // own effect scope — it never reads `owner.webServer`, which is what killed
+  // the old standalone `/dsw` channel on this line (F1/F2: see
+  // `./web-channel.ts` and `docs/rounds/R18-F2-dsw-405.md`). A host without a
+  // web transport therefore just never serves these routes; nothing to guard.
+  //
+  // Registration happens per endpoint and is REVERSIBLE: the returned disposer
+  // is bound to this context through `ctx.effect`. A reload that leaves the
+  // Connection service (and thus the previous routes) alive hits the registry's
+  // duplicate-path guard instead of throwing out of `apply` — the survivor is
+  // the same stateless route and reads `liveDispatch`, so it already serves this
+  // apply's handler.
+  for (const endpoint of CHANNEL_ENDPOINTS) {
+    liveDispatch.set(endpoint, dispatch)
+    const route = channelRouteOf(endpoint, (name) => liveDispatch.get(name))
+    ctx.effect(() => {
+      try {
+        return ctx.connection.fetch.register(route)
+      } catch (error) {
+        if (!isAlreadyRegistered(error)) throw error
+        ctx.logger.debug(`dsw: ${route.path} was already registered; serving the new dispatch through it`)
+        // The surviving registration owns the route; this apply adds nothing to
+        // dispose (the route reads `liveDispatch`, so it is already current).
+        return async () => {}
+      }
+    }, `dsw: ${route.path}`)
   }
+  registerWorkspaceTools(
+    ctx,
+    registry,
+    () => ctx.get('sideWorkspaces', false) as SessionSideWorkspaceStore | undefined,
+    () => ctx.get('sessionConnections', false) as SessionConnectionsFace | undefined,
+  )
 }

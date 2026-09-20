@@ -9,9 +9,9 @@
  * (`bash-sandbox`/`pwsh-sandbox`) stay enabled and consume the mixed
  * `ctx.subprocess`.
  *
- * R4-I2 执行适配层：远程会话的每会话沙箱模式被固定为 `danger-full-access`
- * （session/created 时写入 `sandbox/mode` 覆盖事件），因此沙箱化的 shell
- * 执行器对远程会话跳过本地跑器包装，`bash -c`/`pwsh -Command` 原样到达远端。
+ * REQ-I13: remote sessions keep the deployment `/permission` default. A
+ * remote-cwd `confine` passthrough stops the local runner from wrapping
+ * remote argv (ADR-0025). Per-call sandbox policy selects core `--sandbox`.
  *
  * `name: dsh-workspace-enhancement` in cordis.yml is equivalent to the three
  * subpath rows (`dsh-workspace-enhancement/ssh`, `dsh-workspace-enhancement/

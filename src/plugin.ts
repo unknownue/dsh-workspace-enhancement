@@ -9,9 +9,9 @@
  * (`bash-sandbox`/`pwsh-sandbox`) stay enabled and consume the mixed
  * `ctx.subprocess`.
  *
- * R4-I2 执行适配层：远程会话的每会话沙箱模式被固定为 `danger-full-access`
- * （session/created 时写入 `sandbox/mode` 覆盖事件），因此沙箱化的 shell
- * 执行器对远程会话跳过本地跑器包装，`bash -c`/`pwsh -Command` 原样到达远端。
+ * REQ-I13: remote sessions keep the deployment `/permission` default. A
+ * remote-cwd `confine` passthrough stops the local runner from wrapping
+ * remote argv (ADR-0025). Per-call sandbox policy selects core `--sandbox`.
  *
  * `name: dsh-workspace-enhancement` in cordis.yml is equivalent to the three
  * subpath rows (`dsh-workspace-enhancement/ssh`, `dsh-workspace-enhancement/
@@ -22,8 +22,6 @@
  */
 
 import type { Context } from '@deepseek-ai/cordis'
-import { setSandboxMode } from '@deepseek-ai/dsh-sandbox-policy'
-import type { Session } from '@deepseek-ai/dsh-session'
 import { LocalSubprocessRuntime } from '@deepseek-ai/dsh-subprocess-local'
 import { LocalFileSystem } from '@deepseek-ai/dsh-fs-local'
 import { SandboxedFileSystem } from '@deepseek-ai/dsh-fs-sandbox'
@@ -35,8 +33,18 @@ import { SshSubprocessEngine } from './subprocess.ts'
 import { SshFileSystemEngine } from './filesystem.ts'
 import { MixedFileSystem, MixedSubprocessRuntime } from './mixed.ts'
 import type { FileSystemBranch, SideWorkspaceFace } from './mixed.ts'
-import { remoteRouteFromCwd } from './transport.ts'
+import { createRemoteSpawnGate, registerRemoteApprovalAnswerer } from './remote-approval-gate.ts'
+import {
+  composeFencedGate,
+  createRemoteSandboxFence,
+  createRemoteSandboxTerminalGuard,
+  refuseFencedCommands,
+  remoteSandboxDepsOf,
+} from './remote-sandbox-fence.ts'
 import { SessionSideWorkspaceStore } from './session-workspaces.ts'
+import { ensureCoreHub } from './core-hub.ts'
+import { CoreRoutingFileSystem } from './core-fs.ts'
+import { installRemoteConfinePassthrough } from './remote-confine.ts'
 
 /**
  * The config mirrors the disabled rows' schema defaults (direct construction
@@ -44,26 +52,6 @@ import { SessionSideWorkspaceStore } from './session-workspaces.ts'
  * diffBasisMaxBytes = 10 MiB (the backend's own default).
  */
 const LOCAL_FS_CONFIG = { cwd: process.cwd(), diffBasisMaxBytes: 10 * 1024 * 1024 }
-
-/**
- * R4-I2 执行适配层：远程会话的沙箱视图。每会话策略由 dsh-permission-presets
- * 在 session/created 时 pin 成部署默认（如 workspace-write），而 sandbox 化的
- * shell 执行器（bash-sandbox/pwsh-sandbox）在非 full 模式会把命令包进「本地
- * 沙箱 runner」——那是本机路径/本机节点脚本，远端不存在（exit 127）。远程会话
- * 的唯一正确语义是 full：本地沙箱对远端命令没有意义，跳过包装后
- * `bash -c '<command>'` / `pwsh -Command …` 原样经混合 provider 路由到远端。
- * 我们监听 session/created 并在默认 pin 之后追加 `sandbox/mode:
- * danger-full-access`（寄存器顺序在本 bundle 之后，append 成为最后事件，
- * fold 生效）；用户之后在 UI 里主动切换的模式仍是最后事件，按其决定（诚实：
- * 窄模式 + 远程 = 本地 runner 不可用 → 明确失败，绝不静默本地）。
- * @param ctx - the aggregate row's context.
- */
-function forceRemoteSandboxMode(ctx: Context): void {
-  ctx.on('session/created', (session: Session) => {
-    if (remoteRouteFromCwd(session.header.cwd) === null) return
-    setSandboxMode(session, 'danger-full-access')
-  })
-}
 
 /**
  * Install the mixed providers: the LOCAL implementation classes are
@@ -79,10 +67,12 @@ function forceRemoteSandboxMode(ctx: Context): void {
  * @param ctx - the aggregate row's context.
  */
 export function installMixedProviders(ctx: Context): void {
-  // R5: the session-attached side-workspace store. Registered as a cordis
-  // service ('sideWorkspaces') so the web endpoints and the prompt section
-  // resolve the same instance; the mixed providers gate against it lazily
-  // (a missing store means no side workspaces configured — plain R4 behavior).
+  // R5 → REQ-I7: the session-attached side-workspace store. Registered as a
+  // cordis service ('sideWorkspaces') so the web endpoints and the prompt
+  // section resolve the same instance; the mixed filesystem provider routes
+  // against it lazily (a missing store means no side workspaces configured —
+  // plain R4 behavior). The subprocess facade no longer consults it: the
+  // per-root exec gate was retired with the permission model (ADR-0019).
   const sides = (): SideWorkspaceFace | undefined => {
     const value = ctx.get('sideWorkspaces', false) as SessionSideWorkspaceStore | undefined
     return value
@@ -91,12 +81,26 @@ export function installMixedProviders(ctx: Context): void {
 
   // Subprocess: the local runtime has no service dependencies, so it can be
   // constructed immediately (the deployment default for local executions).
+  // AUDIT-6 (ADR-0020): the remote branch carries the approval gate —
+  // optional services (`approval`/`agents`) resolve by name at ask time, so
+  // the gate composes in any deployment and no-ops for ungated machines.
   const localSubprocess = new LocalSubprocessRuntime(ctx)
-  const sshSubprocess = new SshSubprocessEngine(ctx)
-  ctx.set('subprocess', new MixedSubprocessRuntime(localSubprocess, sshSubprocess, sides))
+  // REQ-I5: one core hub per process. The fence's job on a fenced machine is
+  // to ensure that session is alive and return the original argv; the engine
+  // then `spawn.start`s over RPC. Approval still sees unwrapped argv.
+  const hub = ensureCoreHub(ctx)
+  const fence = createRemoteSandboxFence(ctx, { hub })
+  const sshSubprocess = new SshSubprocessEngine(
+    ctx,
+    createRemoteSpawnGate(ctx),
+    fence,
+    createRemoteSandboxTerminalGuard(ctx),
+    hub,
+  )
+  ctx.set('subprocess', new MixedSubprocessRuntime(localSubprocess, sshSubprocess))
 
   const installFs = (owner: Context, localFs: FileSystemBranch): void => {
-    const sshFs = new SshFileSystemEngine(owner)
+    const sshFs = new CoreRoutingFileSystem(owner, new SshFileSystemEngine(owner), hub)
     owner.set('fs', new MixedFileSystem(localFs, sshFs, sides))
   }
 
@@ -124,7 +128,13 @@ export function installMixedProviders(ctx: Context): void {
  */
 export function apply(ctx: Context, config: Config): void {
   ctx.plugin(SshRuntime, config)
-  forceRemoteSandboxMode(ctx)
+  installRemoteConfinePassthrough(ctx)
+  // AUDIT-6 (ADR-0020 D4): the AI answerer — a prepend `approval/request`
+  // waterfall listener that auto-grants only whitelisted commands on
+  // `remoteApproval: 'ai'` machines and delegates everything else (including
+  // its own failures) to the human answerer. Effect-bound ⇒ reversible.
+  registerRemoteApprovalAnswerer(ctx)
+  ensureCoreHub(ctx)
   // The mixed providers need the local provider classes (dependencies, so
   // always resolvable); if installation fails anyway, fall back to the
   // pure-SSH mounting so the row never fails harder than before.
@@ -132,7 +142,25 @@ export function apply(ctx: Context, config: Config): void {
     installMixedProviders(ctx)
   } catch (error) {
     ctx.logger.warn(`dsw: mixed provider install failed, falling back to pure-SSH providers: ${String(error)}`)
-    ctx.plugin(SshSubprocessRuntime)
+    // REQ-I9 fail-closed on the degraded path (ADR-0022 §2.3): this composition
+    // gets the REFUSING fence. It rides the gate closure because `ctx.plugin`
+    // accepts one non-context argument: approval first, fence decision second,
+    // and the fence's only effect is the refusal (the engine's `resolveArgv`
+    // stays undefined, so nothing is double-wrapped). It reads the SAME machine
+    // view the shipping path reads, so a machine whose `remoteSandbox` is not
+    // `'off'` is refused while `'off'` machines and routes without a connection
+    // id keep today's behaviour byte for byte.
+    //
+    // Window note, stated precisely: while `sshRegistry` is not yet mounted an
+    // id cannot be resolved, so this fence (and the engine's context-derived
+    // one) reads that machine as `'off'`. The window is still closed, but by
+    // INABILITY rather than by this refusal — resolving any remote route goes
+    // through the registry (`resolveSshCwd` throws for an unknown connection),
+    // so no remote command can run in it. Do not restate this as "the fence
+    // refuses every ssh:// route": it refuses fenced machines, and nothing else.
+    const refusalFence = refuseFencedCommands(remoteSandboxDepsOf(ctx))
+    const gate = composeFencedGate(createRemoteSpawnGate(ctx), refusalFence)
+    ctx.plugin(SshSubprocessRuntime, gate)
     ctx.plugin(SshFileSystem)
   }
 }

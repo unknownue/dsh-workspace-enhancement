@@ -5,9 +5,10 @@
  * page (`settings.section`). Registered into both directory-flow holes and the
  * settings section, so mounting `dsh-workspace-enhancement` composes the whole
  * picking interaction. Cross-plane calls ride the shared web transport: local
- * listing through the `workspaces` service (the Host's `directoryPicker`
- * browse capability) and remote listing/connection management through the
- * package's `/dsw` RPC channel.
+ * listing through the client `uiWorkspace` service (the Host `directoryPicker`
+ * browse capability — NOT the `workspaces` controller face, see BUG-3 and
+ * `./local-directory.ts`) and remote listing/connection management through the
+ * package's channel on the shared `/api` transport (`../web-channel.ts`).
  *
  * I18N: the `dsw` dictionary pair (src/locale/) is registered against the
  * framework LocaleRuntime at apply time (drafts/i18n-design.md §9) — the
@@ -58,10 +59,13 @@ export type WireResult = {
         message: string;
     };
 };
-/** The client workspace service's directory faces. */
+/**
+ * The client `workspaces` service (the Workspace Controller's own face):
+ * create / rename / delete / archiveSession / list. It carries NO directory
+ * methods — those live on `uiWorkspace` (`./local-directory.ts`), which is why
+ * BUG-3 threw `ctx.workspaces.listDirectory is not a function`.
+ */
 export interface ClientWorkspaces {
-    listDirectory(path?: string, signal?: AbortSignal): Promise<WireListing>;
-    createDirectory(path: string, name: string): Promise<string>;
     /** The workspaces feed (present once the runtime workspace service is up). */
     list?: ClientSnapshot<{
         items: readonly WorkspaceRowLike[];

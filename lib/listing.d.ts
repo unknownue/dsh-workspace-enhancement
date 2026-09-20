@@ -80,3 +80,17 @@ export declare function listRemoteLevel(ssh: SshTransport, target: string, limit
     signal?: AbortSignal | undefined;
     home?: string;
 }): Promise<RemoteListing>;
+/**
+ * List one remote level through a core RPC session (`fs.listDir`). Directories
+ * and directory-symlinks only, same window semantics as {@link listRemoteLevel}.
+ */
+export declare function listRemoteLevelViaCore(client: {
+    call(method: string, params: unknown, signal?: AbortSignal): Promise<unknown>;
+}, target: string, limit: number, opts?: {
+    signal?: AbortSignal | undefined;
+    home?: string | undefined;
+}): Promise<RemoteListing>;
+/** Create one child directory through core RPC (`fs.mkdir`), non-recursive. */
+export declare function mkdirRemoteViaCore(client: {
+    call(method: string, params: unknown, signal?: AbortSignal): Promise<unknown>;
+}, parent: string, name: string, signal?: AbortSignal): Promise<string>;

@@ -27,6 +27,11 @@ export declare class SshFileSystemEngine {
         signal?: AbortSignal;
     }): Promise<FsTarget>;
     processPath(target: FsTarget): string;
+    /**
+     * BUG-2: the remote world does not share the harness host filesystem, so an
+     * absolute host path never maps onto an SSH target.
+     */
+    processPathFromHostPath(_hostPath: string): string | undefined;
     fileUrl(target: FsTarget): string;
     contains(parent: FsTarget, child: FsTarget): boolean;
     stat(target: FsTarget, signal?: AbortSignal): Promise<FsInfo | undefined>;
@@ -35,6 +40,20 @@ export declare class SshFileSystemEngine {
     }, signal?: AbortSignal): Promise<FsPathInfo | undefined>;
     readText(target: FsTarget, signal?: AbortSignal): Promise<string>;
     readBytes(target: FsTarget, signal: AbortSignal | undefined, maxBytes: number): Promise<Uint8Array>;
+    /**
+     * Read one byte window `[offset, offset + length)` of a regular file — the
+     * seam method the 0.1.5 line added to `FileSystem` (UPSTREAM-1). Semantics
+     * mirror the upstream implementation exactly: an empty `length` is empty
+     * without any I/O, a window starting at or past EOF is empty, a window that
+     * runs past EOF comes back short, and the file is never buffered whole —
+     * `start`/`end` bound the transfer to the window (ssh2's `end` is inclusive,
+     * and a read at/past EOF simply ends the stream, so no `stat`-based clamping
+     * is needed).
+     */
+    readByteRange(target: FsTarget, range: {
+        offset: number;
+        length: number;
+    }, signal?: AbortSignal): Promise<Uint8Array>;
     streamText(target: FsTarget, signal?: AbortSignal): Promise<AsyncIterable<string>>;
     listDir(target: FsTarget, signal?: AbortSignal): Promise<FsDirEntry[]>;
     writeText(target: FsTarget, content: string, expected?: FsWriteIntent, signal?: AbortSignal): Promise<FsWriteOutcome>;
@@ -80,8 +99,8 @@ export declare class SshFileSystem extends FileSystem {
         signal?: AbortSignal;
     }): Promise<FsTarget>;
     processPath(target: FsTarget): string;
+    processPathFromHostPath(hostPath: string): string | undefined;
     fileUrl(target: FsTarget): string;
-    processPathFromHostPath(_hostPath: string): string | undefined;
     contains(parent: FsTarget, child: FsTarget): boolean;
     stat(target: FsTarget, signal?: AbortSignal): Promise<FsInfo | undefined>;
     lstat(path: string, opts?: {
@@ -90,6 +109,15 @@ export declare class SshFileSystem extends FileSystem {
     readText(target: FsTarget, signal?: AbortSignal): Promise<string>;
     streamText(target: FsTarget, signal?: AbortSignal): Promise<AsyncIterable<string>>;
     readBytes(target: FsTarget, signal: AbortSignal | undefined, maxBytes: number): Promise<Uint8Array>;
+    /**
+     * Deliberately declared WITHOUT `override`: the pre-0.1.5 base class has no
+     * `readByteRange`, and `override` on a member that the base does not declare
+     * is TS4113 — the plugin must compile against BOTH families (UPSTREAM-1).
+     */
+    readByteRange(target: FsTarget, range: {
+        offset: number;
+        length: number;
+    }, signal?: AbortSignal): Promise<Uint8Array>;
     listDir(target: FsTarget, signal?: AbortSignal): Promise<FsDirEntry[]>;
     writeText(target: FsTarget, content: string, expected?: FsWriteIntent, signal?: AbortSignal, _sandboxPolicy?: unknown): Promise<FsWriteOutcome>;
     editText(target: FsTarget, edit: FsEditRequest, expected?: {

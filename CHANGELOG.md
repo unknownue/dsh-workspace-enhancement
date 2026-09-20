@@ -2,48 +2,178 @@
 
 所有显著改动记录在此文件，格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.0.0/)（版本：语义化版本）。
 
-## [0.1.4](https://github.com/unknownue/dsh-workspace-enhancement) (2026-09-05)
+## Unreleased
+
+### fork 适配（unknownue/dsh-workspace-enhancement）随上游合并
+
+以下条目原记于 fork 分支的 0.1.3 / 0.1.4（与上游同名版本号并行发布），合并上游后纳入主线。
+
+#### 连接自愈（fork 0.1.4，2026-09-05）
 
 连接自愈：SSH 长连接静默死亡后自动重连，`sw_*` 工具不再报 `Error: Not connected`。
 
-### 修复
+##### 修复
 
-- **连接死亡检测**：`SshSession` 现在监听整条 ProxyJump 链的 `close` 事件——远端/NAT/网络把空闲 socket 静默掐断后（此前 `connected` 标记永远为 true、缓存的 `ready` 客户端永远返回死 client），立即失效缓存的 client/SFTP/远端环境，下一次操作透明地重新拨号；`isConnected()` 不再撒谎。
+- **连接死亡检测**：上游 `#21`（`86f9d6f`）以 generation 方案实现了同一修复（陈旧链的死亡事件按代次忽略），本次合并采用上游实现，fork 的 `closeGuards` 方案弃用；`isConnected()` 不再在 socket 静默死亡后撒谎。
 - **`Not connected` 重试一次**：`SshSession.exec` 与 `SshSubprocessHandle.run`（`sw_exec`/bash 的 spawn 通道）在 socket 恰在通道建立前死亡时，失效连接并换新链重试一次（ssh2 的 `Not connected` 签名），工具调用自愈而非失败。
 - **`sw_connect` 真正重连**：`connectUpsert` 保存后执行 `reconnect`（dispose 旧链 → 重建 → probe），upsert 不再复用死连接——`sw_connect` 的 ping 现在报告真实的连接错误，而不是误导性的 `Not connected`。
-- **keepalive 默认开启（10s）**：registry 连接默认 `keepaliveInterval: 10_000`（此前默认 0 = 关闭），空闲连接不再被云 NAT/防火墙静默清理，且死链可在 `keepaliveCountMax` 个周期内被发现；机器记录显式写 0 仍可关闭。
+- **keepalive 默认开启**：取上游 30s × 3（`BUG-5`，约 90s 内发现死链）；fork 原定的 10s 不采纳。机器记录显式写 0 仍可关闭。
 
-### 质量
+##### 质量
 
 - `tsc` 0 错误；`tsdown` 构建通过；ssh-core 失效/重试逻辑冒烟 7/7。
 
-## [0.1.3](https://github.com/unknownue/dsh-workspace-enhancement) (2026-09-05)
+#### dsh 0.1.2 兼容（fork 0.1.3，2026-09-05）
 
 dsh 0.1.2 兼容修复（fork：unknownue/dsh-workspace-enhancement）。
 
-### 修复
+##### 修复
 
 - **`ctx.fs.processPathFromHostPath` seam**：dsh 0.1.2 的 LLM 层（dsh-llm-deepseek / dsh-llm-pi-ai）解析图片附件时会调用 `ctx.get("fs")?.processPathFromHostPath(hostPath)`；远程世界没有宿主机↔远程路径的同一性映射，`SshFileSystem` 按 base 契约返回 `undefined`（图片附件降级为文本占位符，不再抛 `...processPathFromHostPath is not a function` 导致整轮失败），`MixedFileSystem` 委托本地后端（0.1.2 后端已实现该映射）。
 - **`dsh.client.inject` 移除 `@deepseek-ai/dsh-client-runtime`**：该模块在 dsh 0.1.2 已从客户端模块图移除，从 inject 列表中删除以免残留悬空引用。
 - **预构建 `lib/` 入库**：仓库现在携带构建产物，`github:` 依赖安装后开箱即用（与 unknownue 其它插件仓库的发布约定一致）。
 
-### 质量
+##### 质量
 
 - 单测 225/225；`tsc` 0 错误；`tsdown` 构建通过。
 
-## [0.1.2](https://github.com/DobyChao/dsh-workspace-enhancement) (2026-08-31)
+> fork 的 `dsh 0.1.5` `/dsw` 挂载适配（`mountChannel` 结构探针）已被上游的
+> `connection.fetch.register` 方案取代，不再保留。
 
-依赖对齐修复与运行时国际化（R6 I18N）：客户端 UI、宿主「远程认知」系统提示与 `sw_*` 工具面三面全量双语（zh/en）。
+
+## [0.2.1](https://github.com/DobyChao/dsh-workspace-enhancement) (2026-09-20)
+
+0.2.0 之后的修口：日落 `sw_pick_workspace`、围栏档读面降级、win32 bash 按工作区注入，
+以及远端停止 / CAS version / 宿主 tar 三个修复。宿主窗口仍是 `^0.1.5-rc.1`。
+
+升级已部署 0.2.0 核心的机器时请再点一次「部署核心」：工件版本改为 `0.2.1`（组杀与
+`version` 算法都在核心里）。`dsh-core version` / hello 从误留的 `0.2.0-dev` 对齐到 `0.2.1`。
+
+### 变更
+
+- **日落 `sw_pick_workspace`（`REQ-I10`，ADR-0027）**：模型工具只留 `sw_status` / `sw_connect` / `sw_exec`。工作区目录是会话 cwd / 添加工作区目录流，不是工具。`sw_status` / `sw_connect` 文案不再指向已删工具。ADR-0001 的工具清单被取代。旧会话再调该工具会未知工具。
+- **围栏档读/写面拆分（`REQ-I15`，ADR-0025 §2.1）**：核心不可用时官方 Read / 宿主项目根探测走 SFTP，聊天能进；Write / bash 仍 `SANDBOX_UNAVAILABLE`。提示 `remoteNoSandbox` 写明这条拆分。
+- **win32 `bash` 按工作区注入（`REQ-I16`，ADR-0014 ③）**：本地 Windows 会话工具清单不再出现 `bash`。打开远程 Linux 工作区时 `agent/created` 在 `agent.ctx` 上注册。词典描述去掉「本地会报错」那段错键。
+
+### 修复
+
+- **远端任务停止（`BUG-9`）**：核心腿组杀 + pending-abort 保留。直连腿不再把远端 pid 交给宿主（去掉 `echo $$` 与二次 `kill <pid>`）；改由远端 steward 在 SSH stdin EOF 时 `kill -TERM 0`，宿主只 signal + 关 channel。`handle.pid` 恒为 `-1`。有核心时 `danger-full-access` 仍走核心（`--sandbox off`）。
+- **跨传输 `version` 误报 CAS（`BUG-7`）**：SFTP 与核心共用 `fileContentVersion`——完整 POSIX 路径 + size + 秒量化 `mtimeMs` 的 sha256。SFTP attrs 只有秒级 mtime，量化后两边一致。
+- **`core.deploy` 解压（`BUG-8`）**：宿主读 MANIFEST / 抽 `rg` 不再 spawn PATH `tar`（MSYS GNU tar 会弄坏 `-xzOf` 且 stderr 被丢）。改 Node gzip/ustar；失败信息带档案名与原因。远端 Linux 安装脚本仍用 GNU `tar -xzf`。
+
+### 文档
+
+- **待办表可执行**：`docs/backlog.md` 分区必须等于状态列（`doing` 只在 §1），§2 按 P0→P3，备注限长；规则在 `scripts/lib/backlog.mjs`，`check:static` 与 `npm run status` 共用。专题附录迁到 `docs/notes/`（`host-silent-fs` 不再占文档根）。
+
+## [0.2.0](https://github.com/DobyChao/dsh-workspace-enhancement) (2026-09-17)
+
+远端「一个核心」（`REQ-I5` / `REQ-I13`，ADR-0023 / ADR-0024 / ADR-0025）+ 核心分发与第三方工具来源
+（`INFRA-15`）+ 客户端 UI 统一到宿主设计语言（`UX-3`）+ 三个修复（`BUG-4` / `BUG-5` / `BUG-6`）。
+
+### 新增
+
+- **Go `dsh-core` + 成帧 JSON RPC**：围栏档远程 `ctx.fs` / spawn / browse 改走核心；进程自 re-exec 捆绑 bwrap；`off` 仍 SFTP + 裸 exec。未知方法 `UNIMPLEMENTED`；`hello.caps` 为演进舱口。
+- **设置页部署**：通道 `core.deploy` / `core.status`；首次上传允许 SFTP；**不**在模型调用时偷偷安装。v1 只认 linux x86_64。
+- UAT：`docs/uat/R27-req-i13-remote-session-sandbox.md`（REQ-I5 + REQ-I13 合验；对偶 I9-1/2/3，**反转 I9-9**）。原 R26 脚本已作废。
+- **核心分发与第三方工具来源（`INFRA-15`，ADR-0024 §3 政策修订）**：npm 包只带第一方 `core/dist/dsh-core-<ver>-linux-x64.tar.gz`（`files` 加 `core/dist`、`prepack` 守卫保证打包前工件必在、`check` 链加 `build:core`、发布机加 `setup-go`）；**本仓库不再分发任何第三方二进制**——`bwrap` 由远端发行版提供（核心按 `DSH_CORE_BWRAP` → 同目录 `bin/bwrap` → 远端 `PATH` 三层解析，缺失即拒绝该次围栏并给出各发行版安装命令或 `danger-full-access` 出路，不崩宿主），`rg` 远端优先、缺失才由宿主从 **ripgrep 官方 release** 下载静态件、按 pin 的 sha256 校验后缓存到 `$DSH_HOME/cache/dsw-core-vendor/` 并随核心推送（`DSW_CORE_VENDOR_PROXY` / `_BASE_URL` / `_OFFLINE` / 开发开关 `_FORCE_MISSING`）。版本与 pin 单一来源：`core/artifact.json` + `core/vendor.json` → 生成 `src/core-artifact.ts` / `src/core-vendor-pins.ts`，`check:static` 第 14 道闸门拦漂移。
+- **客户端 UI 统一到宿主 dsh 设计语言（`UX-3`）**：四类界面全量走 `--dsw-*` token + 宿主几何；CSS module 内联进 `lib/client.js`，词典 370/370。**真机尾巴**：`docs/uat/R28-ui-design-language.md`（浅/深主题 12 步）待跑。
+
+### 变更
+
+- 围栏提示与 `envMissing` 不再声称「文件工具不在围栏内」，也不再教 `apt-get install ripgrep`。
+- 死字段 `remoteSandboxRunner` 不再读取（REQ-I12 ④）。
+- **核心进程寿命与工作区键（ADR-0024 §6）**：活 `dsh-core serve` 按 `(machine, mode, workspaceRoot)` 缓存；`read-only`/`off` 每机一条，`workspace-write` 每工作区根一条（嵌套共用祖先）；browse/list 路径不再变成 `--workspace`。channel 死后驱逐；SSH 重连/删机器关掉该机全部 serve；空闲 10 分钟且无 spawn job 则杀进程（根身份记得住）。`core.status` 对活会话发不缓存的 `hello`。部署脚本给 `bin/bwrap`/`bin/rg` 也 `chmod +x`。不改 SSH keepalive 默认 0，不随连接自动安装。
+- **远端权限对齐本地提权（REQ-I13 / ADR-0025）**：取消远程会话 `danger-full-access` 钉档；远程 cwd 上 `confine` 短路本机 runner；`sandboxPolicy` 转发到核心 `--sandbox`（`danger` → `off`）；无核心+围栏档 fail-closed；核心拒写带 `FS_SANDBOX_DENIED` + `sandboxDenialMarker`。机器 `remoteSandbox` 不再当权限轴。
+- **R27 当场**：官方 Write 缺叶路径走祖先 `realpath`；禁止 workspace-write `--workspace /`（会盖掉 tmpfs 泄漏 `/tmp`）。
+### 修复
+
+- **宿主静默项目根探测铸出祖先 jail（`BUG-4`）**：`resolve`/`lstat` 把**探测目标**当 `cwd` 交给核心 hub，而 `resolveCoreWorkspace` 对不在已声明根里的 cwd 会铸 sibling workspace-write jail ⇒ 上游 `findProjectRoot` 每上一层祖先就多一份 `--workspace` bind（`/home`、`$HOME`…）。改为只传 `path`（cwd 回落发起会话自己的 cwd），探测落回会话根/机器登记 workspace。事实与取证 `docs/notes/host-silent-fs.md`。
+- **ssh2 死链打挂宿主进程（`BUG-5`）**：`connectReady()` 在 ready 一到就摘掉唯一的 error 监听，此后 `Client` 无任何 error 监听；keepalive 默认 0 ⇒ 空闲回收/超时以裸 `ECONNRESET` 冒出，Node 对无人监听的 `'error'` 抛未捕获异常，整个 `dsh web` 退出。改为连接前即挂 `watchChainClient`（error/close）+ `handleChainDeath`（generation/disposed 守卫）→ `invalidate` 下次自动重连；keepalive 默认 `30 000 × 3`。档案 `docs/rounds/R29-bug5-ssh-error-listener.md`。
+- **删掉核心后状态仍报「已安装」（`BUG-6`）**：`CoreHub.status` 优先问还活着的 `dsh-core serve`（`hello`），只有没有活会话时才探磁盘；serve 活得比它自己的目录久 ⇒ 手工删 `~/.dsh-core/<ver>/` 后面板继续报 installed（最长到空闲回收）。改为**只以磁盘工件为准**（`dsh-core version`），缺失且仍有活会话时在 detail 里说明。
+- **围栏拒绝文案误诊（`INFRA-15` 收口）**：runner 缺失提示只匹配 `No such file or directory` 这类通用串，把「核心被删」误报成「缺 bwrap」。改为按 detail 里出现的**程序名**分诊：`dsh-core` ⇒ 去 `core.deploy`；runner 名 ⇒ 装 bubblewrap；两者都不是 ⇒ 不给建议。
+
+### 质量
+
+- 新增回归：`test/core-vendor.test.ts`（官方取件/校验/缓存/离线 fail-closed）、`test/core-routing.test.ts`「BUG-4」「BUG-6」、`test/core-deploy.test.ts`（安装脚本与远端工具判定）、`test/remote-sandbox.test.ts`「fenceMissingHint」、`core/jail_test.go`（bwrap 三层解析 5 例）。关键用例都跑过**负向对照**（拿掉修复即红）。
+- `check:static` 新增第 14 道闸门（生成的核心清单不得漂移）；`pack-smoke` 硬要求 `core/dist` 工件、体积上限 5→15 MB，并新增「`core/dist` 下只允许 `dsh-core-*.tar.gz`」闸门（0.2.0 发布前实测抓到 `build:core` 的 staging 暂存目录会被一起发出去：+4.72 MB 裸二进制 + 重复 MANIFEST；修后整包 **135 文件 / 3.03 MB**）。
+
+## [0.1.4](https://github.com/DobyChao/dsh-workspace-enhancement) (2026-09-13)
+
+0.1.5 家族运行时支持成立 + 浏览器通道换轨到官方 `/api` + **0.1.2 家族退场** +
+**副工作区权限档位退役（REQ-I7）** + **远程会话审批门（AUDIT-6）** +
+**会话级机器连接（REQ-I11）** + **远端 spawn 围栏（REQ-I9）**。
+
+### 新增
+
+- **会话级机器连接（REQ-I11，ADR-0021，吸收 SEC-5）**：`sw_connect(machines: string[])` 改为本会话已连接机器集合的替换开关（`[]` = 全断）；只接受注册表里已有的机器 id，凭据不再进工具参数。面板变成会话工作区驾驶舱（主工作区 / 副根 / 已连机器）。`ssh://<id>/…` 走注册表级 fs 路由（可见性门，不是围栏）。UAT：`docs/uat/R24-req-i11-session-connections.md`。
+- **远端 spawn 围栏（REQ-I9，ADR-0022）**：逐机器 `remoteSandbox: off | read-only | workspace-write`（默认 `off`，零迁移）。围栏只覆盖经 spawn 的命令；缺 runner / 探针失败即 `SANDBOX_UNAVAILABLE`，不裸跑。**SFTP 写面此刻不在围栏内**（UAT I9-9）；收口是后续核心（`ADR-0023` / `REQ-I5`，预定 0.2.0）。UAT：`docs/uat/R24-req-i9-remote-runner.md`。
+- **远程命令审批门 + AI answerer + 诚实化文案（AUDIT-6，ADR-0020，用户 2026-09-12 拍板）**：混合 subprocess 接缝的远程分支上单一审批门——`bash -c`/`pwsh -Command` 形状的 spawn（含官方 bash/pwsh、`sw_exec`、win32 bash、后台任务，argv 以 `remoteArgvOf` 改写后的最终形态判定）与 `spawnTerminal`（交互 shell 本身即任意命令入口）在**任何 SSH 活动之前**经 `ctx.approval.request` 问询；`agent` 取 `ctx.agents.currentInitiator()`（仅路由/归因，非授权），`reason` 携带 `[dsw-remote-gate] machine=<id> target=<user>@<host> cmd=<预览>` 标记（ask 不带参数，reason 是预览唯一通道）。逐机器 `remoteApproval: 'off' | 'human' | 'ai'`（machines.json，**默认 `'off'` 零迁移**）同时驱动 asker（是否拦）与 answerer（是否自动放权）；`'ai'` 模式下一个 `prepend` 注册的 `approval/request` waterfall 监听器（`ctx.effect` 挂载、全量 try/catch、异常一律 `next()` 委派人类）只对可评审只读白名单（`pwd`/`whoami`/`uname`/`ls`/`cat`/`head`/`tail`/`wc`/`echo`/`git status|log|diff|show`/`node -v`/`rg --version` 等，独立常量表）自动放行。降级全 fail-closed 且文案两两可区分（无 approval 服务 / 无 agent / `rejected`（含 `never` 策略确定性拒绝）/ `cancelled` / `unavailable` / `request()` 抛错）。配套：`sw-remote` 提示段恒注入「远端执行不受本地沙箱限制」诚实句 + 门开启机器注入「勿原样重试被拒命令」预期句（`remoteNoSandbox`/`remoteGateActive` 英文常量，ADR-0014）；设置页机器表单高级区「远程命令审批」下拉（zh/en 词典键）与机器行「🛡 审批」徽标；README/SECURITY 边界句与 D1 不覆盖清单（SFTP 写路径、固定探针、临时连接——结构性答案是 REQ-I9）；UAT 脚本 `docs/uat/R22-audit6-remote-approval-gate.md`。已知实现偏离：`@deepseek-ai/dsh-user-approval` 未落 devDependency（沙箱禁 install、lockfile 无该条目，加列会令 `npm ci` 失步）——契约以本地结构化最小面镜像 + `ctx.get('approval')` 字符串名消费（与上游 0.1.5-rc.1/rc.2 d.ts 核对一致），见 R22 报告。
+
+### 修复
+
+- **`/dsw` 通道在 `0.1.5` 家族上返回 405（`UPSTREAM-3` F2）**：`ctx.connection.rpc.handle('/dsw', …)` 不可用——`dsh-client-connection` 的 `register` 末行读 `owner.webServer`，而 `owner` 是 **Connection 服务自己的 ctx**，该包在 0.1.5 上只声明 `["credentials"]` ⇒ 抛 `cannot get property "webServer" without inject`，注册**从未发生**（F1 的启动崩溃是它的行级形态，子 fiber 化后就是静默 405）。通道改挂**官方共享 `/api` 的精确 Fetch 路由**（`ctx.connection.fetch.register`）：`rpc.intercept('/api')` 这条官方扩展点被单占位的 `dsh-api-gateway` 占死，而精确路由**先于**拦截器被分发且不读 `owner.webServer`（`dsh-client-file-upload` 同款）。客户端改为 `rpc.call('/api', 'dsw/<endpoint>')`，**信封协议不变**。决策见 `ADR-0018`，实证见 `docs/rounds/R19-f2-shared-api-channel.md`。
+- **启动崩溃（`UPSTREAM-3` F1）**：同上根因；换轨后宿主启动不再依赖「哪个上下文能读 `webServer`」。
+- **`dsh-subprocess@0.1.5` 的 `@deepseek-ai/dsh-http-proxy` peer 未落盘**：仓库 `.npmrc` 的 `legacy-peer-deps=true` 不会自动装 peer ⇒ 三个套件在 0.1.5 类型面下直接 `ERR_MODULE_NOT_FOUND`；补进 devDependencies。
+
+### 变更（**破坏性**）
+
+- **`sw_connect` 不再注册机器或接受凭据（REQ-I11）**：参数面只剩 `machines: string[]`；`host` / `username` / `password` / `save:false` 临时连接全部删除。升级后旧的「用工具连任意主机」调用会失败，机器只能从设置页添加。
+- **副工作区权限模型退役，副根降级为薄声明清单（REQ-I7，ADR-0019，用户 2026-09-12 拍板）**：`SideWorkspaceItem` 收缩为 `id/kind/rootKey/label`（删 `fs`/`exec` 字段；加载既有 `dsw-session-workspaces.json` 时忽略旧字段，不报错、不迁移）；删 `mixed.ts` 的 fs 写门与 exec 门（`writeText`/`editText`/`spawn`/`spawnTerminal` 不再因副根档位拒绝；副根路由分支与最长前缀匹配原样保留）；`session.ws.add`/`session.ws.update` RPC 参数收窄（校验是宽松白名单：仍带 `fs`/`exec` 的旧客户端请求照常受理、未知字段被静默忽略——破坏性在旧客户端发来的档位不再产生任何限权效果）；面板删两个权限下拉（只剩挂/卸 + 显示名）；提示词清单行去掉权限标记、边界注改为无档位表述；词典删 6 键（zh/en 仍严格相等）。`SEC-1`/`SEC-2` 随之 dropped（失去对象），`ADR-0012` 作废。动机：远程主工作区成熟后，远程会话内同机任意绝对路径本就可达，副根对同机目录只剩限权作用，而权限门是 advisory 且有已知绕过。
+- **放弃 0.1.2 家族支持（`UPSTREAM-4`，所有者 2026-09-11 拍板）**：peer 13 项 + dev 21 项全部收窄为 `^0.1.5-rc.1`；`upstream.yml` 删除 `legacy`（0.1.2-rc.1）通道，哨兵只剩 `next` / `alpha`；`scripts/boot-smoke.mjs` 的 `--channel-warn`「已知破坏」降级口删除，每通道都强断言。
+- **浏览器通道路径变更**：`/dsw/<endpoint>` → `/api/dsw/<endpoint>`（`docs/architecture.md` §5.6）。**与已发布的 0.1.3 客户端半不兼容**；升级宿主必须一并升级本插件。
+
+### 质量
+
+- `scripts/boot-smoke.mjs` 探测改新路径并强断言 `result.ok=true`；新增 `test/web-channel.test.ts`（线身份、信封/方法不符、415/400/404、dispatch 抛错 500、重载契约、端点清单 ↔ dispatch switch 一致性、两半不得再硬编码通道）。
+- 真机实证（lab profile + `0.1.5-rc.2` 宿主）：`POST /api/dsw/connections.list → 200, result.ok=true`；同一探针在修前构建上给 405。
+- 文档地图（INFRA-13）：`docs/README.md` 为入口；architecture 改为现状短引导；轮次报告降为档案。方向 ADR-0023：远端核心把围栏执行与远端读写放进同一个产物（实现未排期）。
+
+## [0.1.3](https://github.com/DobyChao/dsh-workspace-enhancement) (2026-09-09)
+
+依赖对齐发布 + 模型提示词英文化 + 带图请求修复。
+
+### 新增
+
+- **模型提示词英文化与按需注入（REQ-I6）**：model-facing 文案统一英文、不随 UI 语言切换（`prompt.remote.emphasis` / `prompt.side.*` / `prompt.env.missing` / `prompt.section.swExec` / `prompt.section.win32Bash`），且只在会话确有远程事实或副工作区时注入——本地会话的系统提示不再出现本插件文案；词典删 12 键（340→328，zh/en 仍严格相等）。决策见 `ADR-0014`。
+
+### 修复
+
+- **带图请求全部变成 `TRANSPORT`（BUG-2）**：`ctx.fs` 门面 `MixedFileSystem` 只实现了 `dsh-fs` 接缝的 12 个方法，缺第 13 个 `processPathFromHostPath`——图片附件解析正是走 `ctx.get("fs")?.processPathFromHostPath(hostPath)`，贴图必现 `TypeError` 并被适配器包成 `LlmError(TRANSPORT)`（请求根本没出网）。补齐该方法并转发 local 后端（远程世界不共享宿主文件），另加反射式契约用例锁定上游 13 个方法全集，删任一方法即红。
+- **测试套件里的 Linux 假设（PR #3）**：新增契约用例用裸 POSIX 路径冒充远程 cwd（`worldOfCwd` 的 `/…`→remote 判定只对 win32 生效），Ubuntu 矩阵红、Windows 绿；改用 `sshRoutesRoot()`。
+- **本地 Linux 复验脚本在 Windows 检出下不可执行（FIX-7）**：缺 `.gitattributes` 导致 `scripts/*.sh` 被检出为 CRLF，WSL 里 `set -euo pipefail` 直接报错；补 `*.sh text eol=lf`，并把 WSL 复验写进 push 前必做（`AGENTS.md`）。
+- **发布物依赖形态（ADR-0009）**：0.1.2 的 npm 产物仍是旧的 `dependencies` 形态（13 个 `@deepseek-ai/*` 落在 dependencies），本版起 `dependencies` 仅 `ssh2`、宿主共享包全部走 `peerDependencies`（rc 通道）。
+
+### 质量
+
+- 单测 **259 用例**（`npm test`，CI 权威：ubuntu 22/24 + windows 22 矩阵）；typecheck 0 错误；静态闸门 16 项；`npm pack` 冒烟通过。
+- 新增 WSL Linux 全量复验通道（`scripts/verify-linux.sh`），push 前必跑。
+- 发布改用 **npm Trusted Publishing（OIDC）**：推 `v*` tag 由 GitHub Actions 发布并生成 provenance，不再需要本地 `npm login` 与通行密钥。
+
+### 基建
+
+- 默认分支 `main` → `master`，并加分支保护（必需 CI 检查、禁强推、禁删除）。
+
+## [0.1.2](https://github.com/DobyChao/dsh-workspace-enhancement) (2026-08-31)
+（R6 I18N）：客户端 UI、宿主「远程认知」系统提示与 `sw_*` 工具面三面全量双语（zh/en）。
 
 ### 新增
 
 - **R6 I18N（运行时国际化）**：复用框架 `ctx.locale`（LocaleRuntime）与设置页 Language 行，单一共享词典 `src/locale/`（命名空间 `dsw`，zh 键集真源 + en 编译校验，zh/en 各 340 键严格相等）；客户端 UI 全部文案走 `t()`——目录浏览流程、连接/机器表单、设置页、副工作区面板、状态徽标（row-badges 语言切换即时重绘），切换即生效并持久化；宿主语言 = `settings.locale.preference ?? 'en'`（每次求值即时读，settings 可选、无缓存）；`sw_*` 工具描述/13 条参数/输出渲染/错误消息（路线 B description/parameters getter 范式）与远程认知系统提示（sw-remote section）按当前语言组装；机器标记（`[exit code: N]`/`[stderr]`/`[timed out after Nms]` 等）两语逐字节一致；`bad-request:` 协议层诊断与协议/品牌枚举值保持原文。
 - **依赖对齐**：`@deepseek-ai` 接缝依赖族对齐 `^0.1.1-rc.2`（dsh-fs/dsh-subprocess/dsh-timeout/dsh-llm 等；对应 0.1.1 发布后的 web profile 依赖诊断），devDeps 增加 `dsh-client-locale`/`dsh-client-ui-slots`/`dsh-settings`（类型源，运行时零新增依赖），`dsh.client.inject` 增 `@deepseek-ai/dsh-client-locale`。
 
+### 修复
+
+- **副工作区只读门在 junction / subst / 8.3 短路径下静默失效**（`src/session-workspaces.ts`，`ADR-0013`）：store 用词法 `resolve()` 存 rootKey，而 `ctx.fs` 的本地后端交给门禁的是 realpath 形状的 targetKey —— 同一目录存在两种拼写时前缀匹配落空，写操作被放行且无任何报错。本地根键改为"最近存在祖先的 realpath + 词法尾段"规范化，持久化加载时自动愈合旧记录；新增 junction 回归用例。
+- **设置页用户名输入框溢出卡片**（`src/client/machine-form.tsx`）：共享 `inputStyle` 只有 `flex: 1`，缺 `minWidth: 0`——flex 项的 `min-width: auto` 会退回输入框固有宽度（约 169px），在 1440px 视口下用户名输入框越出卡片 13px。补 `minWidth: 0` + `boxSizing: border-box`。
+- **`test/mixed-install.test.ts` t6 静默失败**：`@deepseek-ai/dsh-session` 0.1.2-rc.1 移除了 `Session.events`（改为 `ownEvents()` / `snapshotEvents()`），断言自 2026-09-08 起失败而无人察觉（无 CI）。改用 `ownEvents()`。
+- **测试污染仓库根目录**：`mixed-install` 的写入探针改为私有临时目录，不再每次 `npm test` 生成 `smoke-install.txt`。
+- **npm 包内残留 source map**：`files` 增加 `!**/*.map`，tarball 由 118 文件 / 0.40 MB 降至 80 文件 / 0.26 MB（`pack-smoke` 闸门拦截回归）。
+
 ### 质量
 
-- 单测 225/225（含 i18n 22 项：键集全等/模板参数一致/机器标记字节一致/宿主语言解析/localizeTool getter 等，存量 202 零回归）；typecheck 0 错误；硬编码门禁（除词典外中文串 0、英文 UI 抽尽，白名单=注释/日志/库错误透传/协议枚举）通过。
-- lab E2E：设置页 Language 行 中文↔English 即时切换（UI/流程/设置/表单双语一致、row-badges 8 枚重绘）、新建远程会话（c1）系统提示与工具面随语言重新组装（会话日志记录 `System Prompt and Tools Updated`）、重启后语言偏好持久；全程隔离 `.dsh-lab`，未触碰真实实例与 `~/.dsh`。
+- 单测 **238/238**（`npm test`，CI 权威）；沙箱内 `npm run test:agent` 提供可信子集信号；typecheck 0 错误；静态闸门 16 项全过；`npm pack` 冒烟全过。
+- 浏览器黑盒：**Playwright 9/9**（`e2e/`，隔离 lab 50599），覆盖启动注入、设置页 zh/en 布局、窄/宽视口换行、副工作区面板主题跟随、语言即时切换、本地会话无远程徽标。
+- lab E2E（历史）：设置页 Language 行 中文↔English 即时切换、新建远程会话（c1）系统提示与工具面随语言重新组装、重启后语言偏好持久；全程隔离 `.dsh-lab`，未触碰真实实例与 `~/.dsh`。
 
 ## [0.1.1](https://github.com/DobyChao/dsh-workspace-enhancement) (2026-08-26)
 

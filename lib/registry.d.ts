@@ -25,6 +25,8 @@ import { HostKeyStore } from './hostkey.ts';
 import type { HostKeyMode, KnownHostEntry } from './hostkey.ts';
 import type { CredentialBackend } from './credential.ts';
 import type { JumpConfig } from './runtime.ts';
+import type { RemoteApprovalMode } from './remote-approval-gate.ts';
+import type { RemoteSandboxMode } from './remote-sandbox.ts';
 /** Registry plugin config. */
 export interface RegistryConfig {
     /**
@@ -151,6 +153,13 @@ export interface MachineInput {
     hostKeyMode?: HostKeyMode;
     strictHostKeyChecking?: boolean;
     knownHosts?: string[];
+    /** AUDIT-6 per-machine approval gate mode (omitted ⇒ keep stored value). */
+    remoteApproval?: RemoteApprovalMode;
+    /**
+     * REQ-I9 per-machine remote sandbox fence mode (omitted ⇒ keep stored
+     * value). `'off'` is the default and is never persisted.
+     */
+    remoteSandbox?: RemoteSandboxMode;
 }
 /** Secret-free machine view returned by `machines.*` endpoints and `status`. */
 export interface MachineView {
@@ -166,6 +175,16 @@ export interface MachineView {
     jumpHosts: string[];
     hostKeyMode?: HostKeyMode;
     credentialBackend: CredentialBackend;
+    /**
+     * AUDIT-6 effective approval-gate mode (ADR-0020 D2) — always present in
+     * views, normalized to `'off'` for records that predate the field.
+     */
+    remoteApproval: RemoteApprovalMode;
+    /**
+     * REQ-I9 effective remote sandbox fence mode (ADR-0022 D1) — always present
+     * in views, normalized to `'off'` for records that predate the field.
+     */
+    remoteSandbox: RemoteSandboxMode;
     /** Encryption was requested but fell back to plaintext (UI warning marker). */
     encryptFallback?: boolean;
     lastConnectedAt?: string | null;
@@ -182,6 +201,12 @@ export interface WorkspaceStatus {
     /** Effective remote workspace of the active machine (`workspace` wins). */
     workspace: string;
     currentId: string | null;
+    /**
+     * Where the active machine comes from. `'ephemeral'` is retained as a
+     * wire-vocabulary member for older clients only: it became unreachable when
+     * temporary connections were retired (REQ-I11 / ADR-0021 §5), so the registry
+     * now only ever reports `'machine' | 'config' | 'none'`.
+     */
     activeSource: 'machine' | 'ephemeral' | 'config' | 'none';
     /** Effective host-key mode of the active machine (or the global default). */
     hostKeyMode: HostKeyMode;
@@ -249,6 +274,12 @@ export interface SshRoute {
     /** Absolute POSIX path on the remote host. */
     path: string;
 }
+/**
+ * Registry connection ids: start with an alphanumeric character. A leading
+ * `.` would treat paths like `.git` as a machine (official git tools then
+ * throw "unknown connection `.git`").
+ */
+export declare function isRegistryConnectionId(id: string): boolean;
 /** Parse `ssh://<connId>/<abs>` (the workspace/cwd spelling of a remote path). */
 export declare function parseSshRoute(value: string): {
     id: string;
@@ -338,7 +369,6 @@ export declare class SshRegistry extends Service {
     private readonly live;
     private readonly probeCache;
     private readonly statusTtlMs;
-    private temporary;
     private configConnection;
     private currentId;
     private nextId;
@@ -401,7 +431,12 @@ export declare class SshRegistry extends Service {
      * username/port plus IdentityFile / ProxyJump presence.
      */
     listConfigHosts(): SshConfigHostView[];
-    /** The active machine: ephemeral tool connection → current → config default. */
+    /**
+     * The active machine: the current registry entry → the cordis.yml config
+     * default. Temporary connections were retired with `sw_connect save:false`
+     * (ADR-0021 §1/§5): the machine universe is the user registry, so there is no
+     * third, non-persisted source of an active machine any more.
+     */
     activeSpec(): SshConnectionSpec | null;
     /** The live connection of the active machine (lazily created). */
     getActive(): {
@@ -409,17 +444,15 @@ export declare class SshRegistry extends Service {
         connection: SshConnection;
     } | null;
     /**
-     * Connect a temporary machine (sw_connect `save: false`): it becomes the
-     * active machine until {@link setCurrent} or a later saved connect.
-     */
-    connectTemporary(input: MachineInput): {
-        id: string;
-        connection: SshConnection;
-    };
-    /**
      * Upsert the tool-connect machine dsh-remote style: match by
      * host+username+port; update the existing record or create a new one, make
      * it current, and persist.
+     *
+     * NOTE (REQ-I11): the `sw_connect` tool no longer calls this — the model
+     * cannot add machines to the user registry (ADR-0021 §2.1). It stays as public
+     * registry API for callers that legitimately create a machine record (the
+     * settings page / add-workspace flow go through `machines.add`, which this
+     * mirrors).
      */
     connectUpsert(input: MachineInput): Promise<{
         id: string;

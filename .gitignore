@@ -1,8 +1,10 @@
 # Dependencies
 node_modules/
 
-# Build output (lib/ is COMMITTED so github: installs work out of the box;
-# see CHANGELOG 0.1.3 — keep it in sync with src via `npm run build`)
+# Build output — upstream ignores the root-anchored /lib/, but this fork
+# COMMITS lib/ so github: installs work out of the box (see CHANGELOG 0.1.3);
+# keep it in sync with src via `npm run build`. scripts/lib/ is source and
+# stays tracked either way.
 dist/
 *.tsbuildinfo
 
@@ -15,31 +17,46 @@ dev-harness/
 *.tmp
 .tmp/
 
+# E2E evidence: screenshots/traces live in CI artifacts or a local run,
+# never in git (see docs/testing.md).
+e2e/artifacts/
+e2e/test-results/
+playwright-report/
+
 # OS / editor
 .DS_Store
 Thumbs.db
 .idea/
 .vscode/
 
-# Secrets — never commit credentials or machine lists
+# Secrets — never commit credentials, machine lists or host keys
 *.pem
 known_hosts.json
 machines.json
 dsh-*-connections.json
 secrets/
 
-# Team/agent ephemeral state (do not commit)
+# Local agent/tool runtime state (not project knowledge)
 .agent-teams/
 .workbuddy/
+.cursor/hooks/state/
 
 # Accidental Windows redirect-output artifact
 nul
 
-# Local draft notes — research/decisions/roadmap; kept on disk only.
-# Public repo carries only README (+ concise docs/ when written).
-drafts/
-AGENTS.md
+# Remote core tarball (built, never committed)
+/core/dist/
+# Third-party tools are NEVER committed or shipped (INFRA-15, ADR-0024 §3):
+# bwrap comes from the remote host's package manager and rg is fetched from its
+# official release on demand. Anything an operator drops here stays local.
+/core/vendor/
 
-# Artifact of test/mixed-install.test.ts write-probe (recreated by every `npm test`)
-smoke-install.txt
+
+# npm pack artifacts
 *.tgz
+
+# Local scratch notes. NOT a knowledge store: anything a fresh clone needs
+# must be promoted into docs/ (see AGENTS.md §真相源). This directory may
+# hold machine-specific data (real hosts, lab paths, profile snapshots) and
+# must never be committed as-is.
+drafts/

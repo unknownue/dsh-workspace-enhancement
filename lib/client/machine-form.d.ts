@@ -22,6 +22,7 @@
 import type { ReactNode } from 'react';
 import type { TranslateNS } from '@deepseek-ai/dsh-client-ui-slots';
 import type { RpcCall } from './status.tsx';
+import type { RemoteApprovalMode, RemoteSandboxMode } from './machine-payload.ts';
 /** One manual or resolved ProxyJump hop. */
 export interface JumpInput {
     host: string;
@@ -59,6 +60,10 @@ export interface MachineFormInitial {
     passphrase?: string;
     workspace?: string;
     hostKeyMode?: '' | 'accept-new' | 'verify' | 'off';
+    /** AUDIT-6 approval-gate mode (edit prefills the stored value). */
+    remoteApproval?: RemoteApprovalMode;
+    /** REQ-I9 remote sandbox fence mode (edit prefills the stored value). */
+    remoteSandbox?: RemoteSandboxMode;
     encryptPassword?: boolean;
     jumpText?: string;
     /** Preferred auth tab ('password' when the machine records password auth). */

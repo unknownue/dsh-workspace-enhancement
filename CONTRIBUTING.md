@@ -1,0 +1,84 @@
+# 贡献与开发流程
+
+> 面向人类协作者。给 AI 代理的规则在 `AGENTS.md`，测试细节在 `docs/testing.md`。
+> 目标是**个人级**流程：不冗长，但每步都留痕、可自动校验。
+
+## 1. 真相源
+
+完整地图见 [`docs/README.md`](./docs/README.md)（想知道什么 → 看哪份 → 不要写在哪）。
+
+`drafts/` 是本地草稿（不入库、可能含机器专属数据），**只作素材**：结论一旦拍板就搬进地图点名的那些文件。
+
+## 2. 一轮的完整流程（短分支 + PR）
+
+**分支模型**：`master` 只收经过 CI 的提交。改动一律走短分支 + PR + **squash merge**
+（全历史保持线性，当前 0 个 merge 提交）。
+
+1. **入账**：在 `docs/backlog.md` 加一行（ID + `todo`，放进 §2 对应优先级块），写清目标与验收标准。备注只留未做动作 + 指针（调查进 `docs/rounds/` / `docs/decisions/`）。
+2. **开工**：状态改 `doing` 时**整行挪到 §1**；从 `master` 拉短分支 `feat/<ID>-slug` / `fix/<ID>-slug` / `chore/<ID>-slug`。分区必须等于状态列，否则 `check:static` 会拦。
+3. **实现**：小步提交，Conventional Commits；提交信息尾行写 `Refs: <ID>`。
+4. **验证**：`npm run check`；UI 改动加 `npm run e2e`；组合改动跑 `--dump-config` 断言。
+5. **交付**：代理 push 分支、开 PR 并盯 CI 到绿（2026-09-09 用户授权）。
+
+   ```powershell
+   git push -u origin <branch>
+   # PR 标题必须是 Conventional Commit：squash 合并会把它当成 master 上的提交标题，
+   # 而静态闸门校验的正是这个标题。浏览器新建 PR 默认填分支名，必须改。
+   gh pr create --title "fix(<scope>): <what>" --body-file .github/PULL_REQUEST_TEMPLATE.md
+   gh pr checks --watch           # CI：PR 标题 + ubuntu 22/24 + windows 22
+   gh pr merge --squash --delete-branch
+   ```
+
+   > `--fill` 在多提交时会把分支名当标题，容易与最终 squash 语义不符——显式写 `--title` 最稳。
+   > PR 标题不合法时 `PR title (squash subject)` 作业会直接拦下（2026-09-10 加，起因是一次
+   > PR 绿、合并后 master 红：squash 标题是分支名）。
+
+6. **验收**：涉及用户可见行为时，随 PR 附 `docs/uat/` 脚本，由用户走查并回填反馈。
+7. **收口**：整行挪到 §4，状态改 `done`/`shipped`，`npm run status` 刷新看板，`docs/rounds/` 写一份报告。
+
+> 例外：错别字、一行文案、纯注释这类不可能改变行为的改动可直接提交到 `master`；
+> 但第 4 步不能跳。**分支上永远不要直接 push 到 `master`。**
+
+## 3. 发布清单
+
+发布走 **npm Trusted Publishing（OIDC）**：本地不需要 `npm login`、不需要通行密钥。一次性配置在 npmjs.com（包 → Settings → Trusted Publisher → GitHub Actions：owner `DobyChao`、仓库 `dsh-workspace-enhancement`、工作流文件名 `release.yml`）；之后每次发版只推 tag：
+
+```powershell
+git switch master && git pull --ff-only
+git tag vX.Y.Z
+git push origin vX.Y.Z      # 排队 .github/workflows/release.yml（还不会发布）
+```
+
+> 推 tag 只是排队：publish 作业挂在 
+pm-publish environment 上，**必须在 Actions 页面点 Approve 才会真正 
+pm publish**——发布决定权始终在仓库所有者手里。
+
+```
+
+发版前逐条确认：
+
+- [ ] `npm run check` 全绿（本地与 CI 都跑过；PR 上 CI 绿才算）
+- [ ] 待发布的改动已通过 PR **squash 合并**到 `master`
+- [ ] `docs/compatibility.md` 支持窗口已更新
+- [ ] `CHANGELOG.md` 有该版本小节（静态闸门会校验）
+- [ ] `npm run status` 已刷新，`docs/status.md` 与 package.json 版本一致
+- [ ] `docs/rounds/` 有本轮报告，`docs/backlog.md` 状态已更新
+- [ ] 工作树干净、`master` 与 `origin/master` 同步
+- [ ] tag 打在版本提交合并之后：`git tag vX.Y.Z && git push origin vX.Y.Z`（触发 `release.yml` 自动发布）
+- [ ] 发布后在 `docs/compatibility.md` 记录实际发布版本
+
+> **`v0.1.2` tag 待修正**：它当前指向 `d30dc57`（准备发布时的中间提交，从未发布，之后又落了提交）。
+> 发布 0.1.2 时应在发布成功后重打：
+> `git tag -f v0.1.2 <被发布的提交> && git push -f origin v0.1.2`（仅此一次；此后 tag 一律只打一次）。
+
+`npm run release` 会跑 `commit-and-tag-version --no-git-tag-version`：它更新版本号、锁文件与 CHANGELOG，
+**不打 tag**——tag 是发布的产物，不是准备动作的产物（历史上出现过 tag 指向中间提交、与 HEAD 不一致）。
+
+## 4. 约定
+
+- 提交信息：Conventional Commits（静态闸门校验 HEAD）。
+- 文档中文，代码标识符与命令英文。
+- 逻辑放 `.ts`，`.tsx` 只做视图（否则沙箱内单测覆盖不到）。
+- 不提交：凭据、真实主机/用户名、`machines.json`、`known_hosts.json`、`drafts/`。
+- 不要手工编辑产品 profile（`$DSH_HOME/profiles/web`）；装/卸一律 `dsh plugin add|remove`。
+- 开发一律在隔离 lab（`DSH_HOME=.dsh-lab`，端口 50599），**绝不碰 3080**。

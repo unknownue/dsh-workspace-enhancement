@@ -24,6 +24,7 @@ import type { JumpConfig } from './runtime.ts'
 import { HostKeyGuard, HostKeyStore, defaultKnownHostsFile } from './hostkey.ts'
 import type { HostKeyMode } from './hostkey.ts'
 import type { CredentialBackend } from './credential.ts'
+import type { RemoteApprovalMode } from './remote-approval-gate.ts'
 
 /** A registry entry as persisted in the state file (machine record). */
 export interface SshConnectionSpec {
@@ -89,6 +90,15 @@ export interface SshConnectionSpec {
   lastProbeAt?: string
   /** Round-trip milliseconds of the last successful status probe. */
   lastProbeLatencyMs?: number | null
+  /**
+   * AUDIT-6 (ADR-0020 D2): per-machine remote-command approval gate —
+   * `'off'` (default, absent on pre-AUDIT-6 records ⇒ zero migration),
+   * `'human'` (ask a human before every gated remote command), `'ai'`
+   * (whitelisted read-only commands auto-granted, everything else to the
+   * human). One field drives BOTH the asker (the seam gate) and the answerer
+   * (the AI auto-grant filter) — one source of truth.
+   */
+  remoteApproval?: RemoteApprovalMode
 }
 
 /** Connection-level host-key policy resolved from a spec + global default. */
@@ -265,13 +275,10 @@ export class SshConnection {
     // Tailscale/DERP-relayed paths routinely exceed 20s to ready (observed
     // 4–20s variance); OpenSSH has no client-side handshake cap at all.
     const readyTimeout = spec.readyTimeout ?? 45_000
-    // Keepalive defaults ON: idle SSH sockets silently die behind NAT/cloud
-    // firewalls (observed: a connection idle a few hours dropped while the
-    // plugin still cached it — every later tool call failed with ssh2's
-    // `Not connected`). ssh2 keepalives both keep the channel alive and let
-    // the close guard detect a dead peer within `keepaliveCountMax` probes.
-    // A spec value wins, so an explicit 0 still disables.
-    const keepaliveInterval = spec.keepaliveInterval ?? 10_000
+    // A zero keepalive lets a silently dead socket (NAT idle recycling, sshd
+    // ClientAliveInterval) surface only as a bare ECONNRESET hours later;
+    // 30s x 3 finds it within ~90s instead (BUG-5, owner-approved 2026-09-16).
+    const keepaliveInterval = spec.keepaliveInterval ?? 30_000
     const keepaliveCountMax = spec.keepaliveCountMax ?? 3
     const parent: ResolvedConnectionHost = {
       host: spec.host,

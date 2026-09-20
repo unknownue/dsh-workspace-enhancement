@@ -4,6 +4,10 @@
  * without mounting the React component (5.11-b).
  * @module dsh-workspace-enhancement/client/machine-payload
  */
+import type { RemoteApprovalMode } from '../remote-approval-gate.ts';
+import type { RemoteSandboxMode } from '../remote-sandbox.ts';
+export type { RemoteApprovalMode };
+export type { RemoteSandboxMode };
 /** One ProxyJump hop as the shared MachineForm assembles it. */
 export interface PayloadJump {
     host: string;
@@ -23,6 +27,10 @@ export interface MachineFormState {
     workspace: string;
     hostKeyMode: '' | 'accept-new' | 'verify' | 'off';
     encryptPassword: boolean;
+    /** AUDIT-6 approval-gate mode — a select, so the value is always explicit. */
+    remoteApproval: RemoteApprovalMode;
+    /** REQ-I9 remote sandbox fence mode — a select, always explicit (`'off'` = default). */
+    remoteSandbox: RemoteSandboxMode;
 }
 /** Cleared form state. */
 export declare const EMPTY_MACHINE_FORM: MachineFormState;

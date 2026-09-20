@@ -8,17 +8,23 @@
  */
 
 import assert from 'node:assert/strict'
+import { mkdtempSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join, resolve } from 'node:path'
 import { test } from 'node:test'
 import { Context } from '@deepseek-ai/cordis'
 import { installMixedProviders } from '../src/plugin.ts'
 import { MixedFileSystem, MixedSubprocessRuntime } from '../src/mixed.ts'
 
 test('installMixedProviders: ctx.subprocess/ctx.fs resolve to the mixed facades (wire mechanism)', async () => {
+  // Write probe goes to a private temp workspace: a repository-root write left
+  // a `smoke-install.txt` artifact behind on every `npm test` run.
+  const workspace = mkdtempSync(join(tmpdir(), 'dsw-mixed-install-'))
   const ctx = new Context()
   await ctx.plugin({ apply(c) {
     c.provide('sandboxPolicy', {
       defaultMode: 'danger-full-access',
-      resolve: () => ({ mode: 'danger-full-access', workspaceRoot: process.cwd() }),
+      resolve: () => ({ mode: 'danger-full-access', workspaceRoot: workspace }),
     })
   } })
   installMixedProviders(ctx)
@@ -35,9 +41,25 @@ test('installMixedProviders: ctx.subprocess/ctx.fs resolve to the mixed facades 
   // t6: a LOCAL write through the facade reaches the sandboxed backend's
   // inject contract (its checkedTarget accesses `this.ctx.sandboxPolicy`
   // when the tool passes no per-call policy).
-  const target = await fs.resolve('smoke-install.txt', { cwd: process.cwd() })
+  const target = await fs.resolve('mixed-install-probe.txt', { cwd: workspace })
   const outcome = await fs.writeText(target, 'ok', undefined, undefined, undefined)
   assert.equal((outcome as { version?: unknown }).version !== undefined, true)
+  // BUG-2: 带图请求走的是接缝的第 13 个方法 `processPathFromHostPath`
+  // （图片附件解析 → resolveImageAccess → ctx.get('fs')?.[…]）。安装后的门面
+  // 缺它即 TypeError → LlmError(TRANSPORT)。这里断言它存在且映射正确。
+  assert.equal(typeof fs.processPathFromHostPath, 'function', 'the installed facade must expose processPathFromHostPath')
+  assert.equal(fs.processPathFromHostPath(join(workspace, 'shot.png')), resolve(join(workspace, 'shot.png')))
+  assert.equal(fs.processPathFromHostPath('relative/shot.png'), undefined)
+})
+
+test('BUG-2: the installed facade maps host paths for the bare local backend too', () => {
+  const ctx = new Context()
+  installMixedProviders(ctx)
+  const fs = ctx.get('fs')
+  assert.equal(typeof fs.processPathFromHostPath, 'function', 'the installed facade must expose processPathFromHostPath')
+  const hostPath = join(tmpdir(), 'dsw-bug2-install.png')
+  assert.equal(fs.processPathFromHostPath(hostPath), resolve(hostPath))
+  assert.equal(fs.processPathFromHostPath('shot.png'), undefined)
 })
 
 test('installMixedProviders: without a sandbox policy the bare local backend backs the facade', () => {
@@ -48,7 +70,7 @@ test('installMixedProviders: without a sandbox policy the bare local backend bac
   assert.equal(fs.sandboxMode, undefined)
 })
 
-test('t6: remote sessions get a forced danger-full-access sandbox override (session/created)', async () => {
+test('t6: remote sessions are NOT pinned to danger-full-access (REQ-I13)', async () => {
   const ctx = new Context()
   const { default: SessionStore } = await import('@deepseek-ai/dsh-session')
   await ctx.plugin(SessionStore)
@@ -65,6 +87,6 @@ test('t6: remote sessions get a forced danger-full-access sandbox override (sess
     }
     return undefined
   }
-  assert.equal(modeOf(remote.events), 'danger-full-access', 'remote session must be forced to full')
-  assert.equal(modeOf(local.events), undefined, 'local session must keep no override')
+  assert.equal(modeOf(remote.ownEvents()), undefined, 'remote session must keep the deployment default')
+  assert.equal(modeOf(local.ownEvents()), undefined, 'local session must keep no override')
 })

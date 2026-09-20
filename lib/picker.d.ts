@@ -80,6 +80,12 @@ export declare class SshDirectoryPicker extends DirectoryPicker {
      * @returns the remote home path.
      */
     private resolveRemoteHome;
+    /**
+     * Operator browse uses core when a Linux artifact is installed (`--sandbox
+     * off`); missing core falls back to SFTP so Windows / undeployed hosts still
+     * pick directories.
+     */
+    private operatorCore;
     /** The browse interaction capability (stable for the service lifetime). */
     capability(): DirectoryPickerCapability;
     /**

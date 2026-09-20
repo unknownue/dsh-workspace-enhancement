@@ -67,8 +67,26 @@ test('lookup：{name} 模板插值（框架同规：占位符缺参保留原文�
   assert.equal(lookup('en', 'flow.badge.jump', { n: 3 }), '3-hop jump')
   assert.equal(lookup('zh', 'flow.badge.jump'), '跳板 ×{n}')
   assert.equal(lookup('zh', 'flow.connection.delete.title', { label: '不存在的参数' }), '删除连接')
-  assert.equal(lookup('en', 'tool.sw_connect.error.connectFailed', { host: 'c1', detail: 'timeout' }), 'sw_connect: cannot connect to c1 — timeout')
-  assert.equal(lookup('zh', 'tool.sw_connect.error.connectFailed', { host: 'c1', detail: 'timeout' }), 'sw_connect: 无法连接 c1 — timeout')
+  // REQ-I11: the old `tool.sw_connect.error.connectFailed` key died with the
+  // credential parameter face; the replacement carries the same multi-param
+  // interpolation contract (explicit id + known-id list).
+  assert.equal(
+    lookup('en', 'tool.sw_connect.error.unknownMachine', { ids: 'c9', known: 'c1, c2' }),
+    'sw_connect: unknown machine id(s): c9 — known: c1, c2',
+  )
+  assert.equal(
+    lookup('zh', 'tool.sw_connect.error.unknownMachine', { ids: 'c9', known: 'c1, c2' }),
+    'sw_connect: 未知机器 id：c9 — 已知：c1, c2',
+  )
+  // The execution-side session gate messages interpolate the connected-id list.
+  assert.equal(
+    lookup('en', 'tool.sw_exec.error.notConnected', { id: 'c2', ids: 'c1' }),
+    'sw_exec: server "c2" is not connected to this session (connected here: c1)',
+  )
+  assert.equal(
+    lookup('zh', 'tool.sw_exec.error.notConnected', { id: 'c2', ids: 'c1' }),
+    'sw_exec: 服务器 "c2" 未连接到本会话（本会话已连接：c1）',
+  )
 })
 
 /* --------------------------------------------- 3) hostLocaleOf：可选服务 + 即时读 */
@@ -151,13 +169,13 @@ test('localizeTool：description/parameters getter 每次访问按当前语言�
   const localized = localizeTool(tool, locale, {
     descriptionKey: 'tool.sw_connect.description',
     buildParams: t => ({
-      path: { type: 'string', required: true, description: t('tool.sw_pick_workspace.param.path') },
+      machines: { type: 'array', items: { type: 'string' }, required: true, description: t('tool.sw_connect.param.machines') },
     }),
   })
   assert.equal(localized.description, zh['tool.sw_connect.description'])
-  assert.equal(localized.parameters.properties?.path?.description, '远程目录绝对路径，如 /home/dev/code/project')
+  assert.equal(localized.parameters.properties?.machines?.description, zh['tool.sw_connect.param.machines'])
   settings.preference = 'en'
   assert.equal(localized.description, en['tool.sw_connect.description'])
-  const params = localized.parameters as { properties: { path: { description: string } } }
-  assert.equal(params.properties.path.description, 'Absolute remote directory path, e.g. /home/dev/code/project')
+  const params = localized.parameters as { properties: { machines: { description: string } } }
+  assert.equal(params.properties.machines.description, en['tool.sw_connect.param.machines'])
 })

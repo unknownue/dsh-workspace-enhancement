@@ -74,6 +74,7 @@ const en: Record<DswKey, string> = {
   'flow.loading.label': 'Loading directory',
   'flow.browse.error.remote': 'Cannot read the remote directory',
   'flow.browse.error.local': 'Cannot read the directory',
+  'flow.error.directoryUnavailable': 'the directory service (uiWorkspace) is not available',
   'flow.auth.complete': 'Complete authentication',
   'flow.empty.title': 'No subfolders',
   'flow.empty.hidden': '{n} more dot-prefixed folders are hidden',
@@ -124,6 +125,8 @@ const en: Record<DswKey, string> = {
   'rpc.connectionsResolve': 'connections.resolve failed',
   'rpc.connectionsAdd': 'connections.add failed',
   'rpc.browseMkdir': 'browse.mkdir failed',
+  'rpc.coreDeploy': 'core.deploy failed',
+  'rpc.coreStatus': 'core.status failed',
   'rpc.connectionsRemove': 'connections.remove failed',
   'rpc.transportUnavailable': 'the web transport is not available',
   'rpc.registryNotMounted': 'the connection registry is not mounted',
@@ -142,6 +145,11 @@ const en: Record<DswKey, string> = {
   'rpc.sideWsSessionEmpty': 'session id must be a non-empty string',
   'rpc.sideWsPathRemote': 'side workspace path must be an ssh://<id>/<absolute posix path>: {path}',
   'rpc.sideWsPathLocal': 'side workspace path must be an absolute local path: {path}',
+  // REQ-I11: session-connection store and session.conn.* RPC error surface.
+  'rpc.connStoreNotMounted': 'the session-connection store is not mounted (is dsw/web mounted?)',
+  'rpc.connUnknownMachine': 'unknown machine id(s): {ids} — known: {known}',
+  'rpc.connNoKnownMachines': '(no machines registered)',
+  'rpc.connMachineEmpty': 'a machine id must be a non-empty string',
   // registry.ts / transport.ts / session-workspaces.ts protocol/data
   // validation and routing errors (t15-r2: every host-triggerable surface is
   // keyed; see i18n-design.md §13-9, now removed)
@@ -207,20 +215,30 @@ const en: Record<DswKey, string> = {
   'form.label.auth': 'Authentication',
   'form.auth.keyTab': 'Private key file',
   'form.auth.passwordTab': 'Password',
+  'form.label.keyPath': 'Private key path',
+  'form.label.keyPassphrase': 'Passphrase (optional)',
   'form.placeholder.keyPassphrase': 'Private-key passphrase (optional)',
   'form.placeholder.keyPath': '~/.ssh/id_ed25519',
   'form.placeholder.password.edit': 'Leave empty to keep unchanged',
   'form.placeholder.password.new': 'SSH password',
   'form.password.hint.edit': 'While editing, leaving it empty keeps the current value; "Encrypt save" is in the advanced section below.',
-  'form.advanced.expanded': '▾ Advanced (collapse)',
-  'form.advanced.collapsed': '▸ Advanced',
-  'form.label.credentialStore': 'Credential store',
+  'form.advanced.label': 'Advanced',
   'form.encrypt.checkbox': 'Encrypt-save the password (system keychain)',
   'form.label.hostKey': 'HostKey mode',
   'form.hostKey.default': '(default accept-new)',
   'form.hostKey.acceptNew': 'accept-new (trust on first use, verify afterwards)',
   'form.hostKey.verify': 'verify (strict: reject unknown hosts)',
   'form.hostKey.off': 'off (no verification, not recommended)',
+  'form.label.remoteApproval': 'Remote command approval',
+  'form.remoteApproval.off': 'off (default: no gate)',
+  'form.remoteApproval.human': 'human (ask before every remote command)',
+  'form.remoteApproval.ai': 'ai (auto-grant read-only whitelist, ask for the rest)',
+  'form.remoteApproval.hint': 'When enabled, remote shell commands and terminals on this machine require an approval decision before they run (default off; see SECURITY for the honest boundary).',
+  'form.label.remoteSandbox': 'Remote permission',
+  'form.remoteSandbox.off': 'off (legacy field, ignored)',
+  'form.remoteSandbox.readOnly': 'read-only (legacy field, ignored)',
+  'form.remoteSandbox.workspaceWrite': 'workspace-write (legacy field, ignored)',
+  'form.remoteSandbox.hint': 'Remote permission follows this session\'s /permission (same official escalation card as local). Deploy the Linux core from Settings. A confined session without a core still allows reads over SFTP; writes and bash are refused. The per-machine fence dropdown is no longer a permission switch. The approval gate stays optional and off by default; turning both on shows two cards.',
   'form.label.jump': 'Jump chain (optional)',
   'form.placeholder.jump': 'bastion or user@bastion.example.com:2202; separate multiple with commas',
   'form.jump.clear': 'Clear',
@@ -241,14 +259,27 @@ const en: Record<DswKey, string> = {
   'settings.description': 'Manage multiple SSH machines (password / private key / host-key trust / keychain). The path is chosen when creating or selecting a workspace: "Local" uses the system folder dialog; "Remote" picks a machine and selects inside its remote directory.',
   'settings.machines.title': 'Configured machines',
   'settings.machines.encryptFallbackBadge': '⚠ encryption unavailable',
-  'settings.machines.currentBadge': '· current',
+  'settings.machines.gateBadge': '🛡 approval:{mode}',
+  'settings.machines.sandboxBadge': '🧱 fence:{mode}',
+  'settings.machines.keychainBadge': 'keychain',
+  'settings.machines.jumpBadge': 'jump {count}',
+  'settings.machines.currentBadge': 'current',
+  'settings.machines.more': 'More',
   'settings.machines.setCurrent': 'Set as current',
   'settings.machines.forgetKey': 'Forget key',
   'settings.machines.edit': 'Edit',
   'settings.machines.delete': 'Delete',
+  'settings.machines.deployCore': 'Deploy core',
+  'settings.machines.coreStatus': 'Core status',
+  'settings.rpc.coreDeployFailed': 'Failed to deploy the core',
+  'settings.rpc.coreStatusFailed': 'Failed to read core status',
+  'settings.core.ok': 'core {version}{arch}',
+  'settings.core.missing': 'core not installed ({detail})',
+  'settings.core.unsupported': 'no fenced core on this architecture ({detail})',
   'settings.machines.empty': 'No machines yet. Add one below.',
   'settings.form.editTitle': 'Edit machine',
   'settings.form.addTitle': 'Add machine',
+  'settings.form.editNote': 'An empty password / passphrase field keeps the stored value.',
   'settings.label': 'Remote workspaces',
 
   /* ---------------------------------------------------- side-workspaces.tsx */
@@ -260,12 +291,10 @@ const en: Record<DswKey, string> = {
   'side.error.path.remote': 'Enter a remote path (starting with /)',
   'side.error.path.local': 'Enter a local directory path',
   'side.card.label': 'Link workspace',
-  'side.card.title': 'Link workspace (side directory of this session)',
+  'side.card.title': 'Session workspaces',
   'side.close.label': 'Close',
   'side.loading': 'Loading…',
-  'side.empty': 'No side directories linked. Side directories are extra roots the model can read and write directly, each with its own permissions.',
-  'side.fs.label': 'fs permission',
-  'side.exec.label': 'execution permission',
+  'side.empty': 'No side directories linked. Side directories are extra roots this session can operate on directly.',
   'side.rename.title': 'Edit name',
   'side.rename.button': 'Rename',
   'side.remove.title': 'Remove',
@@ -278,12 +307,20 @@ const en: Record<DswKey, string> = {
   'side.browse': 'Browse…',
   'side.draft.labelPlaceholder': 'display name (defaults to the directory name)',
   'side.mount': 'Mount',
+  // REQ-I11 (ADR-0021 §2.9): the session-workspace cockpit keys.
+  'side.conn.heading': 'Connected machines',
+  'side.conn.empty': 'No machines connected to this session',
+  'side.conn.connect': 'Connect',
+  'side.conn.disconnect': 'Disconnect',
+  'side.conn.busy': 'Working…',
+  'side.conn.hint': 'Connecting gives this session sw_exec; the official file tools reach any registered machine through ssh://<id>/ paths regardless of this switch.',
+  'side.main.heading': 'Main workspace',
+  'side.main.none': 'Local session — no remote main workspace',
+  'side.roots.heading': 'Side workspaces',
 
-  /* ------------------------------------------------------------ permission */
-  'permission.rw': 'read-write',
-  'permission.r': 'read-only',
-  'permission.execOn': 'executable',
-  'permission.execOff': 'not executable',
+  /* ----------------------------------------------- remote-status-entry.tsx */
+  'header.remote.label': 'Remote status',
+  'header.remote.title': 'Remote connection of this session: {machine} (click to re-check)',
 
   /* ------------------------------------------------------------ status.tsx */
   'status.rpc.failed': 'dsw rpc failed',
@@ -297,72 +334,50 @@ const en: Record<DswKey, string> = {
   'status.retryAction.full': 'Re-check and try to connect',
   'status.retryAction.recheck': 'Re-check',
 
-  /* ------------------------------------------------------- prompt (host) */
-  'prompt.remote.emphasis':
-    '⚠ Your current workspace is a **remote SSH workspace**: `{endpoint}:{displayPath}` (routed through the local placeholder path `{placeholderRoot}\\{connectionId}\\…`; the placeholder path you see is only a routing alias — **all commands and file operations truly happen on the remote server**, and the working directory is a POSIX absolute path).',
-  'prompt.side.fs.r': 'read-only',
-  'prompt.side.fs.rw': 'read-write',
-  'prompt.side.exec.off': 'off',
-  'prompt.side.exec.on': 'on',
-  'prompt.side.item': '- Side workspace **{label}**: `{rootKey}` (fs: {fs} · exec: {exec})',
-  'prompt.side.heading': '**Extra workspaces linked to this session (side directories the model can operate on directly)**:',
-  'prompt.side.note':
-    'Note the permission markers: read-only (fs: read-only) rejects writes, and execution disabled (exec: off) rejects running commands under that directory; for rejected operations use a workspace with permission or ask the user to adjust. Commands run in the main workspace by default; to run on another server use `sw_exec(server, command)`.',
-  'prompt.env.missing':
-    'Hint: the remote is missing {missing} — install them on the remote (for reference only; not auto-installed): rg → sudo apt-get install ripgrep; pwsh → https://aka.ms/powershell',
-  'prompt.section.swExec':
-    "sw_exec executes a command on the specified server; workdir defaults to that server's primary workspace. Check the [exit code: N] marker of each result; investigate non-zero exits before continuing.",
-  'prompt.section.win32Bash':
-    'The bash tool targets remote Linux workspaces; use pwsh for local (Windows) sessions. Check the [exit code: N] marker of each result.',
-
   /* ------------------------------------------------ tool: shared fragments */
-  'tool.common.noActive': 'No active machine — call sw_connect with a host to get started.',
+  'tool.common.noActive': 'No active machine — register one in settings, then connect it to this session with sw_connect.',
   'tool.common.backgroundSentence':
     'Set `run_in_background: true` for long-running commands: the call returns a job id immediately; read its output with `job_output` and stop it with `job_kill`.',
   'tool.common.backgroundUnavailable': 'Background execution is not available; long-running commands must finish within the timeout.',
 
   /* -------------------------------------------------------- tool: sw_status */
   'tool.sw_status.description':
-    'Show the current remote machine (host/user/port), connection health (ping), the current remote workspace, and the host-key policy/state. Call this first to orient, or when an sw_* call fails to check connectivity.',
+    'Show the current remote machine (host/user/port), connection health (ping), the current remote workspace (from the session cwd / machine record, not a model tool), and the host-key policy/state. Call this first to orient, or when an sw_* call fails to check connectivity.',
   'tool.sw_status.ping.ok': 'Ping: OK — {prefix} ({outcome})',
   'tool.sw_status.ping.failed': 'Ping: FAILED — {detail}',
-  'tool.env.heading': 'Remote environment:',
   'tool.sw_status.outputs.host': 'Remote host: {u}@{h}:{p}{source}',
   'tool.sw_status.outputs.workspace': 'Current remote workspace: {ws}',
-  'tool.sw_status.outputs.workspaceNone': 'Current remote workspace: (none — call sw_pick_workspace to set one)',
+  'tool.sw_status.outputs.workspaceNone': 'Current remote workspace: (none — open a remote directory in the add-workspace flow)',
   'tool.sw_status.outputs.connected': 'Connected: {yesno}',
+  // REQ-I11 (ADR-0021 §2.5): the session's own connected machines (id + user@host).
+  'tool.sw_status.outputs.connList': 'Machines connected to this session: {items}',
+  'tool.sw_status.outputs.connNone': 'Machines connected to this session: (none — call sw_connect first)',
   'tool.sw_status.outputs.hostKey': 'Host key: {trusted} (mode={mode})',
   'tool.sw_status.outputs.backend': 'Password backend: {backend}',
 
   /* ------------------------------------------------------- tool: sw_connect */
   'tool.sw_connect.description':
-    'Connect SSH to a remote host for remote workspace work. Provide host (required), user, optional password or privateKeyPath/port. Defaults to saving the machine to the registry and making it current (save=false keeps it as a temporary connection). Once connected, call sw_pick_workspace to pick the workspace directory this session should work in.',
-  'tool.sw_connect.param.host': 'Remote host IP or hostname',
-  'tool.sw_connect.param.username': 'SSH user (default root)',
-  'tool.sw_connect.param.port': 'SSH port (default 22)',
-  'tool.sw_connect.param.password': 'SSH password (prefer SSH key when possible)',
-  'tool.sw_connect.param.privateKeyPath': 'Absolute private-key path',
-  'tool.sw_connect.param.save': 'Save this machine to the registry and make it current (default true)',
-  'tool.sw_connect.output': 'Connected to {host} (id={id}).\n\npick a workspace with sw_pick_workspace (path=<abs>).',
-  'tool.sw_connect.error.hostRequired': 'sw_connect: host is required',
-  'tool.sw_connect.error.connectFailed': 'sw_connect: cannot connect to {host} — {detail}',
-
-  /* ---------------------------------------------------- tool: sw_pick_workspace */
-  'tool.sw_pick_workspace.description':
-    'Set the remote workspace directory this session should treat as its working root on the connected remote. Verifies it exists (a directory); persists it on the active machine (recentWorkspaces keeps the last 8).',
-  'tool.sw_pick_workspace.param.path': 'Absolute remote directory path, e.g. /home/dev/code/project',
-  'tool.sw_pick_workspace.output': 'Workspace set to {path} (active machine: {u}@{h}).',
-  'tool.sw_pick_workspace.error.invalidPath': 'sw_pick_workspace: path must be an absolute remote directory path: {path}',
-  'tool.sw_pick_workspace.error.notDir': 'sw_pick_workspace: {path} is not a directory',
-  'tool.sw_pick_workspace.error.noActive': 'sw_pick_workspace: no active machine — call sw_connect first',
+    'Set which registered machines this session may connect to and run commands on. Every call REPLACES the whole set (it is not a union): `machines: []` disconnects everything. Does not choose a workspace directory (that is the session cwd / add-workspace flow). Machines must be ids of registered machines; an unknown id errors with the known list. Each requested machine is then pinged within a bounded budget: reachable ones are recorded as connected, unreachable ones are reported honestly and left out; when none is reachable the call fails and the existing connections stay unchanged.',
+  'tool.sw_connect.param.machines':
+    'Array of registered machine ids to connect. An empty array disconnects every machine from this session.',
+  'tool.sw_connect.output.cleared': 'Disconnected every machine from this session.',
+  'tool.sw_connect.output.heading': 'Machines connected to this session:',
+  'tool.sw_connect.output.reachable': '- {id} ({endpoint}): reachable, connected',
+  'tool.sw_connect.output.unreachable': '- {id}: unreachable — {detail} (not connected)',
+  'tool.sw_connect.error.noSession': 'sw_connect: cannot resolve this session id — refusing to change connection state',
+  'tool.sw_connect.error.storeMissing': 'sw_connect: the session-connection store is not mounted (is dsw/web mounted?)',
+  'tool.sw_connect.error.unknownMachine': 'sw_connect: unknown machine id(s): {ids} — known: {known}',
+  'tool.sw_connect.error.noKnownMachines': '(no machines registered — add one in the settings page first)',
+  'tool.sw_connect.error.allUnreachable': 'sw_connect: no requested machine was reachable, so this session\'s connections are unchanged.\n{details}',
+  'tool.sw_connect.error.noDetail': 'no failure detail',
 
   /* -------------------------------------------------------------- tool: sw_exec */
   'tool.sw_exec.description':
-    'Execute a command on a registered SSH server and return its stdout/stderr. The `server` id selects the machine (a registry id like c1, or the temporary id of sw_connect save:false); it defaults to the current session workspace machine, and a local session without a server errors. The target OS is probed once per connection and reported in the first line: POSIX runs `bash -c`, Windows runs `pwsh -Command`, unknown runs bash honestly. Each call runs in a fresh shell: no state (cwd, variables, functions) persists between calls — pass `workdir` instead of using `cd`. Non-zero exits are reported as `[exit code: N]` — investigate failures before moving on. Long output is truncated to its tail; the full output is saved to a file whose path is reported when available.',
+    'Execute a command on a registered SSH server connected to this session and return its stdout/stderr. The `server` id selects the machine — it must be a registry id connected to this session (see the connection line of sw_status, or call sw_connect first); it defaults to the machine of this session\'s main workspace. The target OS is probed once per connection and reported in the first line: POSIX runs `bash -c`, Windows runs `pwsh -Command`, unknown runs bash honestly. Each call runs in a fresh shell: no state (cwd, variables, functions) persists between calls — pass `workdir` instead of using `cd`. Non-zero exits are reported as `[exit code: N]` — investigate failures before moving on. Long output is truncated to its tail; the full output is saved to a file whose path is reported when available.',
   'tool.sw_exec.param.workdir':
     "Working directory on the target server. Defaults to that server's primary workspace; a relative path is resolved against the session workspace; `ssh://<id>/<path>` names a machine and directory explicitly.",
   'tool.sw_exec.param.server':
-    'Target server id: a registry machine id (c1, c2, …) or the temporary id of sw_connect save:false. Defaults to the current session workspace machine. Unknown ids error with the known list.',
+    'Target server id: a registry machine id (c1, c2, …) connected to this session. Defaults to the machine of this session\'s main workspace. A registered id that is not connected to this session errors with the connected ids; an unknown id errors with the known list.',
   'tool.sw_exec.output.background': 'started background job {jobId} on {server} ({endpoint})',
   'tool.sw_exec.output.header': 'server: {id} ({endpoint}) · OS: {os}',
   'tool.sw_exec.error.workdirEmpty': 'sw_exec: workdir must not be empty',
@@ -374,10 +389,14 @@ const en: Record<DswKey, string> = {
   'tool.sw_exec.error.noActive': 'sw_exec: no active server — call sw_connect first',
   'tool.sw_exec.error.spawnFailed': 'sw_exec: spawn failed: {detail}',
   'tool.sw_exec.error.serverRequired': 'sw_exec: server required for local sessions',
+  // REQ-I11 (ADR-0021 §2.5): the three execution-side session-gate refusals.
+  'tool.sw_exec.error.noSession': 'sw_exec: cannot resolve this session id — refusing to execute (fail closed)',
+  'tool.sw_exec.error.notConnectedNone': 'sw_exec: no machine is connected to this session — call sw_connect(machines: [...]) first',
+  'tool.sw_exec.error.notConnected': 'sw_exec: server "{id}" is not connected to this session (connected here: {ids})',
 
   /* ------------------------------------------------------------- tool: bash */
   'tool.bash.description':
-    "Execute a bash command (`bash -c`) on the session's remote Linux workspace and return its stdout/stderr. This host is Windows and has no local bash: the command always runs on the remote server the session routes to, and a local (Windows) session errors — use pwsh there. Each call runs in a fresh shell: no state (cwd, variables, functions) persists between calls — pass `workdir` instead of using `cd`. Non-zero exits are reported as `[exit code: N]` — investigate failures before moving on. Long output is truncated to its tail; the full output is saved to a file whose path is reported when available.",
+    "Execute a bash command (`bash -c`) on the session's remote Linux workspace and return its stdout/stderr. Each call runs in a fresh shell: no state (cwd, variables, functions) persists between calls — pass `workdir` instead of using `cd`. Non-zero exits are reported as `[exit code: N]` — investigate failures before moving on. Long output is truncated to its tail; the full output is saved to a file whose path is reported when available.",
   'tool.bash.param.workdir':
     'Working directory for this command. Defaults to the session workspace; a relative path is resolved against it; `ssh://<id>/<path>` names a machine and directory explicitly.',
   'tool.bash.output.background': 'started background job {jobId}',
@@ -409,6 +428,7 @@ const en: Record<DswKey, string> = {
   'tool.error.jobsUnavailable': 'background jobs unavailable: load @deepseek-ai/dsh-jobs and @deepseek-ai/dsh-tool-jobs',
   'tool.error.backgroundDisabled': 'run_in_background is disabled for this deployment (enableRunInBackground: false)',
   'tool.error.aborted': 'tool call aborted',
+  'tool.error.stopFailed': 'the remote process did not exit after TERM/KILL — the tool call stopped waiting; check the remote host for leftover processes',
   'tool.param.error.commandEmpty': 'invalid command: expected a non-empty string',
   'tool.param.error.descriptionEmpty': 'invalid description: expected a non-empty string',
   'tool.param.error.timeoutInvalid': 'invalid timeoutMs: expected a positive number, got {v}',

@@ -23,11 +23,10 @@
 import type { FsDirEntry, FsEditOutcome, FsEditRequest, FsInfo, FsPathInfo, FsTarget, FsVersion, FsWriteIntent, FsWriteOutcome } from '@deepseek-ai/dsh-fs';
 import type { SubprocessHandle, SubprocessSpawnSpec, SubprocessTerminalHandle, SubprocessTerminalSpawnSpec } from '@deepseek-ai/dsh-subprocess';
 import type { SshSubprocessEngine } from './subprocess.ts';
-import type { SshFileSystemEngine } from './filesystem.ts';
 import type { SideWorkspaceItem } from './session-workspaces.ts';
 /**
- * R5: the side-workspace face the mixed providers gate against — the store's
- * `match(path)` (longest owning root) plus the permission leaves only.
+ * R5 → REQ-I7: the side-workspace face the mixed filesystem provider routes
+ * against — the store's `match(path)` (longest owning root).
  */
 export interface SideWorkspaceFace {
     match(path: string): SideWorkspaceItem | undefined;
@@ -73,12 +72,15 @@ export declare function worldOfTargetKey(targetKey: string): ExecutionWorld;
  * `resolveExecutable` is inherently world-less (no cwd parameter) and stays
  * LOCAL — the in-process consumers are host diagnostic tools; the bash/pwsh
  * executors never call it (they spawn `bash`/`pwsh` directly).
+ *
+ * REQ-I7 (ADR-0019): the per-side-workspace exec gate was RETIRED with the
+ * permission model — the facade consults no side-workspace state; routing is
+ * purely world-of-cwd.
  */
 export declare class MixedSubprocessRuntime implements SubprocessBranch {
     private readonly local;
     private readonly remote;
-    private readonly sides?;
-    constructor(local: SubprocessBranch, remote: SshSubprocessEngine, sides?: (() => SideWorkspaceFace | undefined) | undefined);
+    constructor(local: SubprocessBranch, remote: SshSubprocessEngine);
     /** @inheritdoc — local world (see class doc: resolveExecutable is world-less). */
     resolveExecutable(command: string, env?: Readonly<Record<string, string>>, signal?: AbortSignal): Promise<string>;
     /** @inheritdoc */
@@ -86,7 +88,7 @@ export declare class MixedSubprocessRuntime implements SubprocessBranch {
     /** @inheritdoc */
     spawnTerminal(spec: SubprocessTerminalSpawnSpec): Promise<SubprocessTerminalHandle>;
 }
-/** The minimal filesystem surface both branches implement (the seam's 12 methods). */
+/** The minimal filesystem surface both branches implement (the seam's methods). */
 export type FileSystemBranch = {
     /** The backend's default confinement mode, when it confines at all. */
     readonly sandboxMode?: unknown;
@@ -95,13 +97,14 @@ export type FileSystemBranch = {
         signal?: AbortSignal;
     }): Promise<FsTarget>;
     processPath(target: FsTarget): string;
-    fileUrl(target: FsTarget): string;
     /**
-     * dsh 0.1.2 seam: map an absolute harness-host path into this world's
-     * process path when both identify the same file; undefined = no mapping.
-     * Optional because pre-0.1.2 local backends do not implement it.
+     * Map an absolute HARNESS-HOST path into this branch's execution world, or
+     * `undefined` when that world cannot read the host file (the seam method the
+     * base `FileSystem` declares with an empty body). BUG-2: it was missing from
+     * this contract, so `tsc` could not catch a branch that never implemented it.
      */
-    processPathFromHostPath?(hostPath: string): string | undefined;
+    processPathFromHostPath(hostPath: string): string | undefined;
+    fileUrl(target: FsTarget): string;
     contains(parent: FsTarget, child: FsTarget): boolean;
     stat(target: FsTarget, signal?: AbortSignal): Promise<FsInfo | undefined>;
     lstat(path: string, opts?: {
@@ -110,6 +113,21 @@ export type FileSystemBranch = {
     readText(target: FsTarget, signal?: AbortSignal): Promise<string>;
     streamText(target: FsTarget, signal?: AbortSignal): Promise<AsyncIterable<string>>;
     readBytes(target: FsTarget, signal: AbortSignal | undefined, maxBytes: number): Promise<Uint8Array>;
+    /**
+     * One byte window `[offset, offset + length)` — the seam method the 0.1.5
+     * line added (UPSTREAM-1). Optional **on delegates only**, and deliberately
+     * so: the pre-0.1.5 host's own filesystem service has no such method, and a
+     * required member here would make `plugin.ts` stop compiling against the
+     * family we still ship for. The FACADE always implements it (the reflection
+     * contract in `test/mixed-fs-contract.test.ts` is what locks that down) and
+     * answers with a clear `FsError` for a local target when its delegate
+     * predates the method — never a `TypeError`, and never a silent whole-file
+     * buffer.
+     */
+    readByteRange?(target: FsTarget, range: {
+        offset: number;
+        length: number;
+    }, signal?: AbortSignal): Promise<Uint8Array>;
     listDir(target: FsTarget, signal?: AbortSignal): Promise<FsDirEntry[]>;
     writeText(target: FsTarget, content: string, expected?: FsWriteIntent, signal?: AbortSignal, sandboxPolicy?: unknown): Promise<FsWriteOutcome>;
     editText(target: FsTarget, edit: FsEditRequest, expected?: {
@@ -121,15 +139,22 @@ export type FileSystemBranch = {
  * every target operation routes on the target key (`ssh://` = remote).
  * The sandbox mode fact is inherited from the LOCAL delegate (the sandboxed
  * backend reports the deployment default so the tool layer still advertises
- * escalation honestly); the per-call sandbox policy is forwarded to the local
- * delegate and dropped for remote targets — a write on the server can never
- * be fenced by the local sandbox.
+ * escalation honestly); the per-call sandbox policy is forwarded to BOTH
+ * worlds so a remote write can open the matching core `--sandbox` (ADR-0025).
+ *
+ * REQ-I11: routing is REGISTRY-level, not side-root-level. An `ssh://<id>/<path>`
+ * spelling (or its local placeholder) names the remote world on its own, so the
+ * official read/write/edit/glob/grep tools reach any registered machine from a
+ * LOCAL session cwd too — declaring a side workspace is no longer a
+ * precondition for routing. The session's connected-machine set is a gate at
+ * the TOOL layer only (ADR-0021): this face is a visibility gate, never a
+ * fence — anything that can spell the path reaches the machine.
  */
 export declare class MixedFileSystem implements FileSystemBranch {
     private readonly local;
     private readonly remote;
     private readonly sides?;
-    constructor(local: FileSystemBranch, remote: SshFileSystemEngine, sides?: (() => SideWorkspaceFace | undefined) | undefined);
+    constructor(local: FileSystemBranch, remote: FileSystemBranch, sides?: (() => SideWorkspaceFace | undefined) | undefined);
     /** The deployment's confinement fact, as reported by the local backend. */
     get sandboxMode(): unknown;
     /** @inheritdoc */
@@ -139,15 +164,21 @@ export declare class MixedFileSystem implements FileSystemBranch {
     }): Promise<FsTarget>;
     /** @inheritdoc */
     processPath(target: FsTarget): string;
-    /** @inheritdoc */
-    fileUrl(target: FsTarget): string;
     /**
-     * dsh 0.1.2 seam: the LLM layer probes ctx.fs.processPathFromHostPath when
-     * resolving image attachments. Host paths belong to the local world, so
-     * delegate to the local backend's mapping when it implements one (0.1.2
-     * backends do); otherwise answer the base contract's "no mapping".
+     * @inheritdoc
+     *
+     * BUG-2: unlike `processPath`/`fileUrl` there is NO target key to route on —
+     * the argument is an absolute HARNESS-HOST path, and only the local world
+     * shares the host filesystem. The remote world runs on another machine, so
+     * `SshFileSystemEngine` can never read that host file and is deliberately NOT
+     * consulted (returning a remote path here would fabricate a mapping that does
+     * not exist); the local delegate owns the answer, including the "no mapping"
+     * case (`LocalFileSystem`: `isAbsolute(hostPath) ? resolve(hostPath) :
+     * undefined`, inherited by `SandboxedFileSystem`).
      */
     processPathFromHostPath(hostPath: string): string | undefined;
+    /** @inheritdoc */
+    fileUrl(target: FsTarget): string;
     /** @inheritdoc — targets from different worlds never contain one another. */
     contains(parent: FsTarget, child: FsTarget): boolean;
     /** @inheritdoc */
@@ -162,11 +193,24 @@ export declare class MixedFileSystem implements FileSystemBranch {
     streamText(target: FsTarget, signal?: AbortSignal): Promise<AsyncIterable<string>>;
     /** @inheritdoc */
     readBytes(target: FsTarget, signal: AbortSignal | undefined, maxBytes: number): Promise<Uint8Array>;
+    /**
+     * UPSTREAM-1: the 0.1.5 line calls `ctx.get('fs')?.readByteRange(...)`, so the
+     * facade is what the host actually reaches — exactly the BUG-2 shape. Remote
+     * targets forward to the SSH engine; a local target forwards to the local
+     * delegate, which only has the method from the 0.1.5 line on. On an older
+     * host nothing calls this (no caller exists before that line), so the guard
+     * below is a defensive, honest failure instead of a `TypeError` — and instead
+     * of a fallback that would buffer the whole file, which the seam forbids.
+     */
+    readByteRange(target: FsTarget, range: {
+        offset: number;
+        length: number;
+    }, signal?: AbortSignal): Promise<Uint8Array>;
     /** @inheritdoc */
     listDir(target: FsTarget, signal?: AbortSignal): Promise<FsDirEntry[]>;
-    /** @inheritdoc — the per-call policy reaches the local backend only. */
+    /** @inheritdoc — the per-call policy reaches both backends (ADR-0025). */
     writeText(target: FsTarget, content: string, expected?: FsWriteIntent, signal?: AbortSignal, sandboxPolicy?: unknown): Promise<FsWriteOutcome>;
-    /** @inheritdoc — the per-call policy reaches the local backend only. */
+    /** @inheritdoc — the per-call policy reaches both backends (ADR-0025). */
     editText(target: FsTarget, edit: FsEditRequest, expected?: {
         version: FsVersion;
     }, signal?: AbortSignal, sandboxPolicy?: unknown): Promise<FsEditOutcome>;
